@@ -331,7 +331,7 @@ export function useActivityColumns({
               if (parsed) {
                 return formatOptionSubtitle(parsed, formatting);
               }
-              return getExchangeDisplayName(row.exchangeMic);
+              return row.assetName?.trim() || getExchangeDisplayName(row.exchangeMic);
             },
             isClearable: (rowData: unknown) => {
               const row = rowData as LocalTransaction;
