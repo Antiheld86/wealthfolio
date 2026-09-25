@@ -723,6 +723,7 @@
       "status": "Status",
       "date_time": "Date & Time",
       "symbol": "Symbol",
+      "name": "Name",
       "quantity": "Quantity",
       "price": "Price",
       "amount": "Amount",

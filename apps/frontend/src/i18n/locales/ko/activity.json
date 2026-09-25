@@ -719,6 +719,7 @@
       "status": "상태",
       "date_time": "날짜 및 시간",
       "symbol": "종목 코드",
+      "name": "이름",
       "quantity": "수량",
       "price": "가격",
       "amount": "금액",

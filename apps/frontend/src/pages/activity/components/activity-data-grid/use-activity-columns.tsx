@@ -350,6 +350,18 @@ export function useActivityColumns({
         },
       },
 
+      // 8.5. Name (read-only; derived from the linked asset)
+      {
+        accessorKey: "assetName",
+        header: t("activity:datagrid.column.name"),
+        size: 160,
+        enableSorting: false,
+        enableHiding: true,
+        meta: {
+          cell: { variant: "short-text", readOnly: true },
+        },
+      },
+
       // 9. Instrument Type (hidden by default, editable select)
       {
         id: "instrumentType",

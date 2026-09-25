@@ -719,6 +719,7 @@
       "status": "状态",
       "date_time": "日期与时间",
       "symbol": "代码",
+      "name": "名称",
       "quantity": "数量",
       "price": "价格",
       "amount": "金额",

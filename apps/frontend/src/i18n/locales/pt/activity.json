@@ -732,6 +732,7 @@
       "status": "Status",
       "date_time": "Data e hora",
       "symbol": "Símbolo",
+      "name": "Nome",
       "quantity": "Quantidade",
       "price": "Preço",
       "amount": "Valor",

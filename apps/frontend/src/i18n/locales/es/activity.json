@@ -732,6 +732,7 @@
       "status": "Estado",
       "date_time": "Fecha y hora",
       "symbol": "Símbolo",
+      "name": "Nombre",
       "quantity": "Cantidad",
       "price": "Precio",
       "amount": "Importe",

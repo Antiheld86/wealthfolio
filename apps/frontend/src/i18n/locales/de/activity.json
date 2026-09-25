@@ -617,6 +617,7 @@
       "status": "Status",
       "date_time": "Datum & Uhrzeit",
       "symbol": "Symbol",
+      "name": "Name",
       "quantity": "Menge",
       "price": "Kurs",
       "amount": "Betrag",
