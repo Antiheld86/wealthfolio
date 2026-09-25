@@ -561,7 +561,10 @@ export function SidebarConfigurator({
   // unrealized-gain share of the taxable bucket is taxed on withdrawal.
   const taxableGainFraction =
     taxBucketBalances && taxBucketBalances.taxable > 0
-      ? Math.min(1, Math.max(0, (taxBucketBalances.taxable - taxableCostBasis) / taxBucketBalances.taxable))
+      ? Math.min(
+          1,
+          Math.max(0, (taxBucketBalances.taxable - taxableCostBasis) / taxBucketBalances.taxable),
+        )
       : 0;
   const averageWithdrawalTaxRate =
     taxBucketBalances && taxBucketTotal > 0
