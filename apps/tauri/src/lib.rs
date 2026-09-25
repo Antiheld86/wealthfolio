@@ -239,9 +239,10 @@ pub fn run() {
 
             // Registry failures are recoverable. Platform setup opens profiles
             // asynchronously while this state serves the startup recovery UI.
-            handle.manage(profile_startup::ProfileStartup::new(get_app_data_dir(
-                &handle,
-            )?));
+            handle.manage(profile_startup::ProfileStartup::new(
+                get_app_data_dir(&handle)?,
+                handle.config().identifier.clone(),
+            ));
 
             // Platform-specific plugin initialization
             #[cfg(desktop)]
@@ -758,6 +759,22 @@ pub fn run() {
         // Failure to construct the application is terminal; no command runtime exists yet.
         .expect("Failed to build Wealthfolio application")
         .run(|_handle, event| {
+            #[cfg(mobile)]
+            if matches!(
+                &event,
+                tauri::RunEvent::WindowEvent {
+                    event: tauri::WindowEvent::Resumed,
+                    ..
+                }
+            ) {
+                if let Some(context) = _handle
+                    .try_state::<profiles::NativeProfiles>()
+                    .and_then(|profiles| profiles.try_context())
+                {
+                    listeners::refresh_portfolio_on_resume(_handle.clone(), context);
+                }
+            }
+
             #[cfg(desktop)]
             if matches!(
                 event,
