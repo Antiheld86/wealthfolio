@@ -239,9 +239,10 @@ pub fn run() {
 
             // Registry failures are recoverable. Platform setup opens profiles
             // asynchronously while this state serves the startup recovery UI.
-            handle.manage(profile_startup::ProfileStartup::new(get_app_data_dir(
-                &handle,
-            )?));
+            handle.manage(profile_startup::ProfileStartup::new(
+                get_app_data_dir(&handle)?,
+                handle.config().identifier.clone(),
+            ));
 
             // Platform-specific plugin initialization
             #[cfg(desktop)]
@@ -636,15 +637,9 @@ pub fn run() {
             #[cfg(feature = "device-sync")]
             commands::device_sync::reset_team_sync,
             #[cfg(feature = "device-sync")]
-            commands::device_sync::device_sync_bootstrap_snapshot_if_needed,
-            #[cfg(feature = "device-sync")]
             commands::device_sync::device_sync_engine_status,
             #[cfg(feature = "device-sync")]
             commands::device_sync::device_sync_pairing_source_status,
-            #[cfg(feature = "device-sync")]
-            commands::device_sync::device_sync_bootstrap_overwrite_check,
-            #[cfg(feature = "device-sync")]
-            commands::device_sync::device_sync_reconcile_ready_state,
             #[cfg(feature = "device-sync")]
             commands::device_sync::device_sync_trigger_cycle,
             #[cfg(feature = "device-sync")]
@@ -676,17 +671,19 @@ pub fn run() {
             // Composite pairing endpoints
             #[cfg(feature = "device-sync")]
             commands::device_sync::complete_pairing_with_transfer,
+            // Restore operation (receiving device)
             #[cfg(feature = "device-sync")]
-            commands::device_sync::confirm_pairing_with_bootstrap,
-            // Pairing flow coordinator
+            commands::device_sync::device_sync_start_restore,
             #[cfg(feature = "device-sync")]
-            commands::device_sync::begin_pairing_confirm,
+            commands::device_sync::device_sync_get_restore,
             #[cfg(feature = "device-sync")]
-            commands::device_sync::get_pairing_flow_state,
+            commands::device_sync::device_sync_approve_restore,
             #[cfg(feature = "device-sync")]
-            commands::device_sync::approve_pairing_overwrite,
+            commands::device_sync::device_sync_retry_restore,
             #[cfg(feature = "device-sync")]
-            commands::device_sync::cancel_pairing_flow,
+            commands::device_sync::device_sync_cancel_restore,
+            #[cfg(feature = "device-sync")]
+            commands::device_sync::device_sync_begin_pairing_restore,
             // Device enroll service (high-level commands)
             #[cfg(feature = "device-sync")]
             commands::device_enroll_service::get_device_sync_state,
@@ -762,6 +759,22 @@ pub fn run() {
         // Failure to construct the application is terminal; no command runtime exists yet.
         .expect("Failed to build Wealthfolio application")
         .run(|_handle, event| {
+            #[cfg(mobile)]
+            if matches!(
+                &event,
+                tauri::RunEvent::WindowEvent {
+                    event: tauri::WindowEvent::Resumed,
+                    ..
+                }
+            ) {
+                if let Some(context) = _handle
+                    .try_state::<profiles::NativeProfiles>()
+                    .and_then(|profiles| profiles.try_context())
+                {
+                    listeners::refresh_portfolio_on_resume(_handle.clone(), context);
+                }
+            }
+
             #[cfg(desktop)]
             if matches!(
                 event,

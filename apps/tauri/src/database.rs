@@ -244,7 +244,7 @@ impl DatabaseRuntime {
                 root: app_data_dir.into(),
                 database,
             },
-            shared_secret_store(),
+            shared_secret_store(crate::data_dir::PRODUCTION_APP_IDENTIFIER),
             Arc::default(),
         )
     }
@@ -927,6 +927,11 @@ impl DatabaseRuntime {
             worker.abort();
             let _ = worker.await;
         }
+
+        // A restore in progress starts engine and portfolio work; stop it before
+        // stopping those. A replacement already handed to the writer still commits.
+        #[cfg(feature = "device-sync")]
+        context.device_sync_runtime().clear_restore().await;
 
         // Portfolio requests can outlive their caller; join them before closing the writer.
         context.portfolio_tasks.stop().await;
