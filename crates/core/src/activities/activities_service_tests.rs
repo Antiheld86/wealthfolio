@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::accounts::{Account, AccountServiceTrait, AccountUpdate, NewAccount};
     use crate::activities::activities_model::*;
     use crate::activities::{
@@ -236,17 +236,29 @@ mod tests {
 
         async fn ensure_assets(
             &self,
-            specs: Vec<crate::assets::AssetSpec>,
+            mut specs: Vec<crate::assets::AssetSpec>,
             _activity_repository: &dyn crate::activities::ActivityRepositoryTrait,
         ) -> Result<crate::assets::EnsureAssetsResult> {
             let mut result = crate::assets::EnsureAssetsResult::default();
             let mut assets = self.assets.lock().unwrap();
 
-            for spec in specs {
+            let input_keys: Vec<Option<String>> = specs
+                .iter()
+                .map(|spec| spec.id.clone().or_else(|| spec.instrument_key()))
+                .collect();
+            let resolutions = crate::assets::resolve_bond_aliases(&specs, &assets);
+            for (spec, resolution) in specs.iter_mut().zip(resolutions) {
+                resolution.apply_to_spec(spec);
+            }
+
+            for (spec, input_key) in specs.into_iter().zip(input_keys) {
                 if let Some(ref id) = spec.id {
                     // Look up existing assets by spec ID
                     if let Some(asset) = assets.iter().find(|a| a.id == *id) {
                         result.assets.insert(id.clone(), asset.clone());
+                        if let Some(input_key) = input_key {
+                            result.input_to_asset_id.insert(input_key, id.clone());
+                        }
                     }
                     continue;
                 }
@@ -258,6 +270,11 @@ mod tests {
                     .find(|a| a.instrument_key.is_some() && a.instrument_key == instrument_key)
                 {
                     result.assets.insert(existing.id.clone(), existing.clone());
+                    if let Some(input_key) = input_key {
+                        result
+                            .input_to_asset_id
+                            .insert(input_key, existing.id.clone());
+                    }
                     continue;
                 }
                 let symbol = spec
@@ -278,6 +295,11 @@ mod tests {
                 };
                 result.created_ids.push(created.id.clone());
                 result.assets.insert(created.id.clone(), created.clone());
+                if let Some(input_key) = input_key {
+                    result
+                        .input_to_asset_id
+                        .insert(input_key, created.id.clone());
+                }
                 assets.push(created);
             }
 
@@ -481,7 +503,7 @@ mod tests {
                                 "XETR" => Some(".DE"),
                                 "XTSE" => Some(".TO"),
                                 "XLON" => Some(".L"),
-                                "CXE" => Some(".XC"),
+                                "BCXE" => Some(".XC"),
                                 _ => None,
                             })
                             .filter(|suffix| !suffix.is_empty())
@@ -880,8 +902,9 @@ mod tests {
             _instrument_type: Option<&InstrumentType>,
             _quote_ccy: Option<&str>,
             _preferred_provider: Option<&str>,
+            _provider_symbol: Option<&str>,
         ) -> Result<ResolvedQuote> {
-            let is_uk_vwrp = (exchange_mic == Some("XLON") || exchange_mic == Some("CXE"))
+            let is_uk_vwrp = (exchange_mic == Some("XLON") || exchange_mic == Some("BCXE"))
                 && (symbol.eq_ignore_ascii_case("VWRPL")
                     || symbol.eq_ignore_ascii_case("VWRPL.XC"));
             if is_uk_vwrp {
@@ -1161,6 +1184,7 @@ mod tests {
             _instrument_type: Option<&InstrumentType>,
             _quote_ccy: Option<&str>,
             _preferred_provider: Option<&str>,
+            _provider_symbol: Option<&str>,
         ) -> Result<ResolvedQuote> {
             unimplemented!()
         }
@@ -1291,7 +1315,7 @@ mod tests {
 
     // --- Mock ActivityRepository ---
     #[derive(Clone, Default)]
-    struct MockActivityRepository {
+    pub(crate) struct MockActivityRepository {
         activities: Arc<Mutex<Vec<Activity>>>,
     }
 
@@ -4099,6 +4123,314 @@ mod tests {
         let prepared = &result.prepared[0].activity;
         assert_eq!(prepared.needs_review, Some(true));
         assert_eq!(prepared.amount, Some(dec!(150)));
+    }
+
+    #[tokio::test]
+    async fn batch_prepare_bond_broker_symbols_preserve_venues() {
+        for import in [false, true] {
+            let account_service = Arc::new(MockAccountService::new());
+            let asset_service = Arc::new(MockAssetService::new());
+            let account = create_test_account("acc-bonds", "CAD");
+            account_service.add_account(account.clone());
+            for (mic, currency) in [(None, "USD"), (Some("XTSE"), "CAD"), (Some("XNYS"), "USD")] {
+                let key = mic.map_or_else(|| "BOND:ABC".into(), |mic| format!("BOND:ABC@{mic}"));
+                let mut asset = create_test_asset_with_instrument(
+                    &format!("bond-{}", mic.unwrap_or("unqualified")),
+                    "ABC",
+                    mic,
+                    Some(InstrumentType::Bond),
+                    currency,
+                );
+                asset.instrument_key = Some(key);
+                asset_service.add_asset(asset);
+            }
+            let service = ActivityService::new(
+                Arc::new(MockActivityRepository::new()),
+                account_service,
+                asset_service.clone(),
+                Arc::new(MockFxService::new()),
+                Arc::new(MockQuoteService),
+            );
+            let activities = [("XTSE", "CAD"), ("XNYS", "USD")]
+                .into_iter()
+                .map(|(mic, currency)| NewActivity {
+                    id: Some(format!("buy-{mic}")),
+                    account_id: account.id.clone(),
+                    asset: Some(AssetResolutionInput {
+                        symbol: Some("ABC".into()),
+                        exchange_mic: Some(mic.into()),
+                        instrument_type: Some("BOND".into()),
+                        quote_ccy: Some(currency.into()),
+                        ..Default::default()
+                    }),
+                    activity_type: "BUY".into(),
+                    subtype: None,
+                    activity_date: "2024-01-15".into(),
+                    quantity: Some(dec!(100)),
+                    unit_price: Some(dec!(1)),
+                    amount: Some(dec!(100)),
+                    currency: currency.into(),
+                    fee: None,
+                    tax: None,
+                    status: Some(ActivityStatus::Posted),
+                    notes: None,
+                    fx_rate: None,
+                    metadata: None,
+                    needs_review: None,
+                    source_system: Some("SNAPTRADE".into()),
+                    source_record_id: Some(format!("buy-{mic}")),
+                    source_group_id: None,
+                    idempotency_key: None,
+                    import_run_id: None,
+                })
+                .collect();
+            let result = if import {
+                service
+                    .prepare_activities_for_import(activities, &account)
+                    .await
+            } else {
+                service
+                    .prepare_activities_for_sync(activities, &account)
+                    .await
+            }
+            .unwrap();
+
+            assert!(result.errors.is_empty());
+            assert_eq!(result.assets_created, 0);
+            assert_eq!(result.prepared.len(), 2);
+            for (prepared, mic) in result.prepared.iter().zip(["XTSE", "XNYS"]) {
+                let expected_id = format!("bond-{mic}");
+                assert_eq!(
+                    prepared.activity.get_symbol_id(),
+                    Some(expected_id.as_str())
+                );
+            }
+            assert_eq!(asset_service.get_assets().unwrap().len(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_prepare_bond_cusip_reuses_holdings_isin_identity() {
+        let canadian_isin = crate::utils::cusip::cusip_to_isin("135087D27", "CA");
+        for (holding_exists, account_ccy, cusip, isin) in [
+            (false, "USD", "912810TH1", "US912810TH14"),
+            (true, "USD", "912810TH1", "US912810TH14"),
+            (false, "CAD", "912810TH1", "US912810TH14"),
+            (true, "CAD", "912810TH1", "US912810TH14"),
+            (false, "USD", "135087D27", canadian_isin.as_str()),
+            (true, "USD", "135087D27", canadian_isin.as_str()),
+        ] {
+            let account_service = Arc::new(MockAccountService::new());
+            let asset_service = Arc::new(MockAssetService::new());
+            let account = create_test_account("acc-usd", account_ccy);
+            account_service.add_account(account.clone());
+            if holding_exists {
+                asset_service.add_asset(Asset {
+                    id: "holding-bond".to_string(),
+                    display_code: Some(isin.to_string()),
+                    instrument_symbol: Some(isin.to_string()),
+                    instrument_type: Some(InstrumentType::Bond),
+                    instrument_key: Some(format!("BOND:{isin}")),
+                    quote_ccy: "USD".to_string(),
+                    kind: AssetKind::Investment,
+                    ..Default::default()
+                });
+            }
+            let activity_service = ActivityService::new(
+                Arc::new(MockActivityRepository::new()),
+                account_service,
+                asset_service.clone(),
+                Arc::new(MockFxService::new()),
+                Arc::new(MockQuoteService),
+            );
+            let activity = NewActivity {
+                id: Some("bond-buy".to_string()),
+                account_id: "acc-usd".to_string(),
+                asset: Some(AssetResolutionInput {
+                    symbol: Some(cusip.to_string()),
+                    instrument_type: Some("BOND".to_string()),
+                    quote_ccy: None,
+                    ..Default::default()
+                }),
+                activity_type: "BUY".to_string(),
+                subtype: None,
+                activity_date: "2024-01-15".to_string(),
+                quantity: Some(dec!(1000)),
+                unit_price: Some(dec!(0.955)),
+                currency: account_ccy.to_string(),
+                fee: None,
+                tax: None,
+                amount: Some(dec!(955)),
+                status: Some(ActivityStatus::Posted),
+                notes: None,
+                fx_rate: None,
+                metadata: None,
+                needs_review: None,
+                source_system: Some("SNAPTRADE".to_string()),
+                source_record_id: Some("bond-buy".to_string()),
+                source_group_id: None,
+                idempotency_key: None,
+                import_run_id: None,
+            };
+
+            for symbol in [cusip, isin, cusip] {
+                let mut activity = activity.clone();
+                let input = activity.asset.as_mut().unwrap();
+                input.symbol = Some(symbol.to_string());
+                input.exchange_mic = Some("XNAS".to_string());
+                let result = activity_service
+                    .prepare_activities_for_sync(vec![activity.clone()], &account)
+                    .await
+                    .expect("bond activity should prepare");
+                assert!(result.errors.is_empty());
+                assert_eq!(result.prepared.len(), 1);
+                assert_eq!(result.prepared[0].activity.amount, Some(dec!(955)));
+                assert_eq!(result.prepared[0].activity.unit_price, Some(dec!(0.955)));
+                let asset_id = result.prepared[0].activity.get_symbol_id();
+                let expected_id = if holding_exists {
+                    "holding-bond".to_string()
+                } else if cusip.starts_with("912") {
+                    "created-US912810TH14".to_string()
+                } else {
+                    format!("created-{cusip}")
+                };
+                assert_eq!(asset_id, Some(expected_id.as_str()));
+                let assets = asset_service.get_assets().unwrap();
+                assert_eq!(assets.len(), 1);
+                let stored_symbol = if !holding_exists && !cusip.starts_with("912") {
+                    cusip
+                } else {
+                    isin
+                };
+                assert_eq!(
+                    assets[0].instrument_key.as_deref(),
+                    Some(format!("BOND:{stored_symbol}").as_str())
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_prepare_mixed_bond_identifiers_in_one_batch_links_both_activities() {
+        let account_service = Arc::new(MockAccountService::new());
+        let asset_service = Arc::new(MockAssetService::new());
+        let account = create_test_account("acc-bonds", "USD");
+        account_service.add_account(account.clone());
+        let activity_service = ActivityService::new(
+            Arc::new(MockActivityRepository::new()),
+            account_service,
+            asset_service.clone(),
+            Arc::new(MockFxService::new()),
+            Arc::new(MockQuoteService),
+        );
+        let isin = crate::utils::cusip::cusip_to_isin("135087D27", "CA");
+        let make_activity = |symbol: &str| NewActivity {
+            id: None,
+            account_id: account.id.clone(),
+            asset: Some(AssetResolutionInput {
+                symbol: Some(symbol.to_string()),
+                instrument_type: Some("BOND".to_string()),
+                ..Default::default()
+            }),
+            activity_type: "BUY".to_string(),
+            subtype: None,
+            activity_date: "2024-01-15".to_string(),
+            quantity: Some(dec!(100)),
+            unit_price: Some(dec!(1)),
+            amount: Some(dec!(100)),
+            currency: "USD".to_string(),
+            fee: None,
+            tax: None,
+            status: Some(ActivityStatus::Posted),
+            notes: None,
+            fx_rate: None,
+            metadata: None,
+            needs_review: None,
+            source_system: Some("SNAPTRADE".to_string()),
+            source_record_id: None,
+            source_group_id: None,
+            idempotency_key: None,
+            import_run_id: None,
+        };
+
+        let result = activity_service
+            .prepare_activities_for_sync(
+                vec![make_activity("135087D27"), make_activity(&isin)],
+                &account,
+            )
+            .await
+            .unwrap();
+        assert!(result.errors.is_empty());
+        assert_eq!(result.prepared.len(), 2);
+        let first_id = result.prepared[0].activity.get_symbol_id().unwrap();
+        assert_eq!(result.prepared[1].activity.get_symbol_id(), Some(first_id));
+        assert_eq!(asset_service.get_assets().unwrap().len(), 1);
+        assert_eq!(
+            asset_service.get_assets().unwrap()[0]
+                .instrument_key
+                .as_deref(),
+            Some(format!("BOND:{isin}").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_bond_activity_reuses_existing_cusip_by_isin() {
+        let account_service = Arc::new(MockAccountService::new());
+        let asset_service = Arc::new(MockAssetService::new());
+        account_service.add_account(create_test_account("acc-bonds", "USD"));
+        let cusip = "037833EZ9";
+        let isin = crate::utils::cusip::cusip_to_isin(cusip, "US");
+        let asset = create_test_asset_with_instrument(
+            "existing-bond",
+            cusip,
+            None,
+            Some(InstrumentType::Bond),
+            "USD",
+        );
+        asset_service.add_asset(asset);
+        let activity_service = ActivityService::new(
+            Arc::new(MockActivityRepository::new()),
+            account_service,
+            asset_service.clone(),
+            Arc::new(MockFxService::new()),
+            Arc::new(MockQuoteService),
+        );
+
+        let created = activity_service
+            .create_activity(NewActivity {
+                id: Some("bond-buy".to_string()),
+                account_id: "acc-bonds".to_string(),
+                asset: Some(AssetResolutionInput {
+                    symbol: Some(isin),
+                    instrument_type: Some("BOND".to_string()),
+                    quote_ccy: Some("USD".to_string()),
+                    ..Default::default()
+                }),
+                activity_type: "BUY".to_string(),
+                subtype: None,
+                activity_date: "2024-01-15".to_string(),
+                quantity: Some(dec!(100)),
+                unit_price: Some(dec!(0.98)),
+                amount: Some(dec!(98)),
+                currency: "USD".to_string(),
+                fee: None,
+                tax: None,
+                status: None,
+                notes: None,
+                fx_rate: None,
+                metadata: None,
+                needs_review: None,
+                source_system: None,
+                source_record_id: None,
+                source_group_id: None,
+                idempotency_key: None,
+                import_run_id: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(created.asset_id.as_deref(), Some("existing-bond"));
+        assert_eq!(asset_service.get_assets().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -9586,7 +9918,7 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         let checked = &result[0];
-        assert_eq!(checked.exchange_mic.as_deref(), Some("CXE"));
+        assert_eq!(checked.exchange_mic.as_deref(), Some("BCXE"));
         assert_eq!(checked.quote_ccy.as_deref(), Some("GBP"));
         assert!(
             checked

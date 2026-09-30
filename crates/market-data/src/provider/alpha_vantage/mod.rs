@@ -424,6 +424,7 @@ impl EtfProfileResponse {
     /// Convert to AssetProfile
     fn to_asset_profile(&self, _symbol: &str) -> AssetProfile {
         AssetProfile {
+            bond: None,
             source: Some(PROVIDER_ID.to_string()),
             name: None, // ETF_PROFILE doesn't include name
             quote_type: Some("ETF".to_string()),
@@ -482,6 +483,7 @@ impl CompanyOverviewResponse {
             });
 
         AssetProfile {
+            bond: None,
             source: Some(PROVIDER_ID.to_string()),
             name: self.name.clone(),
             quote_type,

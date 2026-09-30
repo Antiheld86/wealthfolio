@@ -13,6 +13,8 @@ it.each([
     "PROFILE_ORIGIN_REJECTED: /private/secret/internal-details",
     "We couldn’t connect to this Wealthfolio server. Check the address you’re using or contact the server administrator.",
   ],
+  ["PROFILE_CONNECTION_FAILED", "Unable to verify your profile. Check your connection and retry."],
+  ["PROFILE_AUTH_REQUIRED", "Your sign-in session could not be verified. Reload to sign in again."],
   ["PROFILE_LOCKED", "Enter your profile password to continue."],
   ["PROFILE_STALE", "Your session has ended. Unlock your profile again."],
   ["PROFILE_NOT_FOUND", "This profile is no longer available. Choose another profile."],

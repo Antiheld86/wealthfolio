@@ -13,7 +13,7 @@ mod import_run_model;
 mod transfer_pairs;
 
 #[cfg(test)]
-mod activities_service_tests;
+pub(crate) mod activities_service_tests;
 
 #[cfg(test)]
 mod activities_model_tests;

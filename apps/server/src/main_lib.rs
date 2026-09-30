@@ -483,6 +483,34 @@ pub(crate) async fn build_profile_state(
 ) -> anyhow::Result<Arc<AppState>> {
     std::fs::create_dir_all(database_root(&config.db_path))?;
     let database_owner = Arc::new(db::DatabaseOwner::acquire(&config.db_path)?);
+    match initialize_profile_state(config, secret_store, &database_owner).await {
+        Ok(state) => Ok(state),
+        Err(error) => match wait_for_startup_cleanup(&database_owner).await {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(error.context(cleanup_error)),
+        },
+    }
+}
+
+async fn wait_for_startup_cleanup(owner: &Arc<db::DatabaseOwner>) -> anyhow::Result<()> {
+    // Dropping an r2d2 pool does not join its in-flight connection threads.
+    // Keep ownership until those threads finish, so the next startup can retry.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while Arc::strong_count(owner) > 1 {
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "Profile startup cleanup is pending; background database connections are still finishing"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
+
+async fn initialize_profile_state(
+    config: &Config,
+    secret_store: Arc<dyn SecretStore>,
+    database_owner: &Arc<db::DatabaseOwner>,
+) -> anyhow::Result<Arc<AppState>> {
     let db_access = open_database(config, &config.db_path)?;
     let db_path = db_access.path().to_string();
     let data_root_path = database_root(&db_path).to_path_buf();
@@ -1150,7 +1178,7 @@ pub(crate) async fn build_profile_state(
         db_path,
         db_access,
         database_key: Arc::new(db::DbEncryptionKey::from_bytes(&config.database_key)),
-        _database_owner: Arc::clone(&database_owner),
+        _database_owner: Arc::clone(database_owner),
         secret_store,
         event_bus,
         auth: auth_manager,
@@ -1206,6 +1234,38 @@ pub(crate) async fn build_profile_state(
 mod runtime_setting_tests {
     use super::*;
     use axum::response::IntoResponse;
+
+    #[tokio::test]
+    async fn failed_startup_cleanup_waits_for_remaining_pool_connections_before_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("app.db");
+        let path = path.to_str().unwrap();
+        let owner = Arc::new(db::DatabaseOwner::acquire(path).unwrap());
+        let pool = db::DbAccess::plaintext(path)
+            .create_pool_with_owner(owner.clone())
+            .unwrap();
+        let connection = pool.get().unwrap();
+        drop(pool);
+
+        {
+            let cleanup = wait_for_startup_cleanup(&owner);
+            tokio::pin!(cleanup);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut cleanup)
+                    .await
+                    .is_err()
+            );
+            assert!(db::DatabaseOwner::acquire(path).is_err());
+
+            drop(connection);
+            tokio::time::timeout(std::time::Duration::from_secs(5), &mut cleanup)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        drop(owner);
+        db::DatabaseOwner::acquire(path).unwrap();
+    }
 
     #[test]
     fn poisoned_settings_return_internal_errors_instead_of_default_values() {
