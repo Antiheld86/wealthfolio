@@ -642,10 +642,12 @@ pub struct ProviderProfile {
     pub notes: Option<String>,
     pub countries: Option<String>,
     pub categories: Option<String>,
+    /// Asset-class allocation JSON with fractional weights (1.0 = 100%).
     pub classes: Option<String>,
     pub attributes: Option<String>,
     pub currency: String,
     pub data_source: String,
+    /// Sector allocation JSON with fractional weights (1.0 = 100%).
     pub sectors: Option<String>,
     pub industry: Option<String>,
     pub url: Option<String>,

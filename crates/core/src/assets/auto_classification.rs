@@ -177,22 +177,15 @@ fn map_provider_asset_class_to_taxonomy(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Validate a provider weight already expressed as a fraction (1.0 = 100%).
+/// Leveraged funds can report fractions above 1.0; units belong to the provider.
 fn parse_provider_weight(weight: f64) -> Option<f64> {
-    if !weight.is_finite() || weight <= 0.0 {
-        return None;
-    }
-    if weight <= 1.0 {
-        Some(weight)
-    } else if weight <= 100.0 {
-        Some(weight / 100.0)
-    } else {
-        None
-    }
+    (weight.is_finite() && weight > 0.0).then_some(weight)
 }
 
 fn weights_to_basis_points(weights: BTreeMap<&'static str, f64>) -> Vec<(String, i32)> {
     let total_weight: f64 = weights.values().sum();
-    if total_weight <= 0.0 {
+    if !total_weight.is_finite() || total_weight <= 0.0 {
         return Vec::new();
     }
 
@@ -234,6 +227,21 @@ fn asset_class_assignments_from_provider(classes: &[ClassWeight]) -> Vec<(String
     for class in classes {
         if let Some(category_id) = map_provider_asset_class_to_taxonomy(&class.name) {
             *mapped.entry(category_id).or_insert(0.0) += class.weight;
+        }
+    }
+    weights_to_basis_points(mapped)
+}
+
+/// Maps provider sector weights to GICS sectors, merging duplicates and keeping the
+/// total within 10000 bp. Rounding each weight on its own could exceed 100% (XEF.TO's
+/// eleven sectors round to 10002 bp), which a taxonomy replacement rejects.
+fn sector_assignments_from_input(input: &ClassificationInput) -> Vec<(String, i32)> {
+    let mut mapped = BTreeMap::new();
+    for sector in &input.sectors {
+        if let Some(category_id) = map_sector_to_gics(&sector.name) {
+            if sector.weight.is_finite() && sector.weight > 0.0 {
+                *mapped.entry(category_id).or_insert(0.0) += sector.weight;
+            }
         }
     }
     weights_to_basis_points(mapped)
@@ -432,6 +440,7 @@ fn map_country_to_region(country: &str) -> Option<&'static str> {
 #[derive(Debug, Clone)]
 pub struct ProviderWeight {
     pub name: String,
+    /// Fractional weight (1.0 = 100%), which can exceed 1.0 for leveraged funds.
     pub weight: f64,
 }
 
@@ -463,7 +472,8 @@ pub struct ClassificationInput {
     pub country: Option<String>,
 }
 
-/// Raw provider profile fields used for taxonomy classification.
+/// Provider profile fields used for taxonomy classification.
+/// Weighted JSON fields contain provider-normalized fractions, never percentages.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProviderProfileClassification<'a> {
     pub quote_type: Option<&'a str>,
@@ -627,19 +637,7 @@ impl AutoClassificationService {
         }
 
         // 3. Classify sectors (industries_gics)
-        let sector_assignments: Vec<(String, i32)> = input
-            .sectors
-            .iter()
-            .filter_map(|sector| {
-                let category_id = map_sector_to_gics(&sector.name)?;
-                let weight_bp = (sector.weight * 10000.0).round() as i32;
-                if weight_bp > 0 {
-                    Some((category_id.to_string(), weight_bp.min(10000)))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let sector_assignments = sector_assignments_from_input(input);
         if !sector_assignments.is_empty() || !input.sectors.is_empty() {
             let result_sectors: Vec<(String, f64)> = sector_assignments
                 .iter()
@@ -774,17 +772,16 @@ impl AutoClassificationService {
             .iter()
             .any(|assignment| !assignment.source.eq_ignore_ascii_case(AUTO_SOURCE));
 
-        for assignment in taxonomy_assignments
-            .iter()
-            .filter(|assignment| assignment.source.eq_ignore_ascii_case(AUTO_SOURCE))
-        {
-            self.taxonomy_service
-                .remove_asset_assignment(&assignment.id)
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-
         if has_non_auto_assignment {
+            for assignment in taxonomy_assignments
+                .iter()
+                .filter(|assignment| assignment.source.eq_ignore_ascii_case(AUTO_SOURCE))
+            {
+                self.taxonomy_service
+                    .remove_asset_assignment(&assignment.id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
             debug!(
                 "Skipping AUTO classification for {} {} because non-AUTO assignments exist",
                 asset_id, taxonomy_id
@@ -792,38 +789,27 @@ impl AutoClassificationService {
             return Ok(0);
         }
 
-        let assignment_count = assignments.len();
-        for (category_id, weight) in assignments {
-            self.assign_to_taxonomy(asset_id, taxonomy_id, &category_id, weight)
-                .await?;
-        }
-
-        Ok(assignment_count)
-    }
-
-    /// Helper to assign an asset to a taxonomy category
-    async fn assign_to_taxonomy(
-        &self,
-        asset_id: &str,
-        taxonomy_id: &str,
-        category_id: &str,
-        weight: i32,
-    ) -> Result<(), String> {
-        let assignment = NewAssetTaxonomyAssignment {
-            id: None, // Auto-generate ID
-            asset_id: asset_id.to_string(),
-            taxonomy_id: taxonomy_id.to_string(),
-            category_id: category_id.to_string(),
-            weight,
-            source: AUTO_SOURCE.to_string(),
-        };
-
-        self.taxonomy_service
-            .assign_asset_to_category(assignment)
+        // One transactional replace per taxonomy. Removing and inserting one row at a
+        // time left partial classifications when enrichment was cancelled mid-way
+        // (queue_worker runs it under a 30s timeout), e.g. 4 of 11 sectors on XEF.TO.
+        let replacement: Vec<NewAssetTaxonomyAssignment> = assignments
+            .into_iter()
+            .map(|(category_id, weight)| NewAssetTaxonomyAssignment {
+                id: None, // Auto-generate ID
+                asset_id: asset_id.to_string(),
+                taxonomy_id: taxonomy_id.to_string(),
+                category_id,
+                weight,
+                source: AUTO_SOURCE.to_string(),
+            })
+            .collect();
+        let replaced = self
+            .taxonomy_service
+            .replace_asset_taxonomy_assignments(asset_id, taxonomy_id, replacement)
             .await
             .map_err(|e| e.to_string())?;
 
-        Ok(())
+        Ok(replaced.len())
     }
 }
 
@@ -1035,6 +1021,125 @@ mod tests {
     }
 
     #[test]
+    fn test_yahoo_asset_allocations_preserve_fractional_units() {
+        // Captured Yahoo positions after the adapter drops non-positive values.
+        // Expected assignments retain the existing positive-only allocation policy.
+        let cases = [
+            (
+                "CAGE.TO",
+                r#"[{"name":"stock","weight":1.0046},{"name":"cash","weight":0.0050999997}]"#,
+                vec![("EQUITY", 9949), ("CASH_BANK_DEPOSITS", 51)],
+            ),
+            (
+                "RSSY",
+                r#"[{"name":"stock","weight":0.6381},{"name":"bond","weight":1.157},{"name":"other","weight":0.32919997}]"#,
+                vec![("EQUITY", 3555), ("FIXED_INCOME", 6445)],
+            ),
+            (
+                "PSLDX",
+                r#"[{"name":"stock","weight":1.0141001},{"name":"bond","weight":1.5281}]"#,
+                vec![("EQUITY", 3989), ("FIXED_INCOME", 6011)],
+            ),
+            (
+                "SQQQ",
+                r#"[{"name":"cash","weight":3.687},{"name":"bond","weight":0.2604},{"name":"other","weight":0.0529}]"#,
+                vec![("CASH_BANK_DEPOSITS", 9340), ("FIXED_INCOME", 660)],
+            ),
+            (
+                "SDS",
+                r#"[{"name":"cash","weight":2.7470999},{"name":"bond","weight":0.0552},{"name":"other","weight":0.19790001}]"#,
+                vec![("CASH_BANK_DEPOSITS", 9803), ("FIXED_INCOME", 197)],
+            ),
+            (
+                "RSST",
+                r#"[{"name":"stock","weight":1.5199001},{"name":"cash","weight":1.2539},{"name":"other","weight":0.4156}]"#,
+                vec![("EQUITY", 5479), ("CASH_BANK_DEPOSITS", 4521)],
+            ),
+            (
+                "VCIT",
+                r#"[{"name":"bond","weight":1.0002999},{"name":"convertible","weight":0.0004}]"#,
+                vec![("FIXED_INCOME", 10000)],
+            ),
+            (
+                "XEC.TO",
+                r#"[{"name":"stock","weight":1.0032},{"name":"preferred","weight":0.0002}]"#,
+                vec![("EQUITY", 9998), ("FIXED_INCOME", 2)],
+            ),
+            (
+                "XBB.TO",
+                r#"[{"name":"bond","weight":1.0001999},{"name":"convertible","weight":0.00090000004}]"#,
+                vec![("FIXED_INCOME", 10000)],
+            ),
+        ];
+
+        for (symbol, json, expected) in cases {
+            let input = ClassificationInput::from_provider_profile(ProviderProfileClassification {
+                quote_type: Some("ETF"),
+                classes_json: Some(json),
+                ..Default::default()
+            });
+            let assignments: BTreeMap<_, _> = asset_class_assignments_from_input(&input)
+                .into_iter()
+                .collect();
+            let expected: BTreeMap<_, _> = expected
+                .into_iter()
+                .map(|(category, weight)| (category.to_string(), weight))
+                .collect();
+
+            assert_eq!(assignments, expected, "{symbol}");
+        }
+    }
+
+    #[test]
+    fn test_asset_class_assignments_reject_overflow() {
+        for json in [
+            r#"[{"name":"stock","weight":1e308},{"name":"bond","weight":1e308}]"#,
+            r#"[{"name":"bond","weight":1e308},{"name":"preferred","weight":1e308}]"#,
+        ] {
+            let classes = parse_weighted_json(json);
+            assert_eq!(classes.len(), 2);
+            assert!(asset_class_assignments_from_provider(&classes).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_parse_weighted_json_preserves_partial_allocation_and_filters_invalid_entries() {
+        let classes = parse_weighted_json(
+            r#"[
+                {"name":"stock","weight":0.60},
+                {"name":"bond","weight":-0.30},
+                {"name":"cash","weight":0},
+                {"name":"other","weight":"0.10"},
+                {"name":null,"weight":0.10},
+                {"name":"preferred"}
+            ]"#,
+        );
+        assert_eq!(classes.len(), 1);
+        assert_eq!(
+            asset_class_assignments_from_provider(&classes),
+            vec![("EQUITY".to_string(), 6000)]
+        );
+        assert!(parse_weighted_json("invalid JSON").is_empty());
+    }
+
+    #[test]
+    fn test_parse_provider_weight_rejects_non_finite_values() {
+        for weight in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(parse_provider_weight(weight).is_none());
+        }
+    }
+
+    #[test]
+    fn test_parse_weighted_json_fractions_unchanged() {
+        let classes = parse_weighted_json(
+            r#"[{"name":"stock","weight":0.9916},{"name":"cash","weight":0.0067},{"name":"other","weight":0.0017}]"#,
+        );
+        let weights: Vec<f64> = classes.iter().map(|c| c.weight).collect();
+
+        assert_eq!(weights, vec![0.9916, 0.0067, 0.0017]);
+    }
+
+    #[test]
     fn test_asset_class_assignments_normalize_above_100_percent() {
         let classes = vec![
             ClassWeight {
@@ -1198,7 +1303,7 @@ mod tests {
 
     #[test]
     fn test_parse_classes_json() {
-        let json = r#"[{"name":"stock","weight":60},{"name":"bond","weight":40}]"#;
+        let json = r#"[{"name":"stock","weight":0.60},{"name":"bond","weight":0.40}]"#;
         let input = ClassificationInput::from_provider_profile(ProviderProfileClassification {
             quote_type: Some("ETF"),
             classes_json: Some(json),
@@ -1258,11 +1363,13 @@ mod tests {
             ),
         ]));
         let classifier = AutoClassificationService::new(service.clone());
-        let input = ClassificationInput {
-            quote_type: Some("ETF".to_string()),
-            name: Some("Amundi Euro Government Bond 3-5Y UCITS ETF".to_string()),
+        let input = ClassificationInput::from_provider_profile(ProviderProfileClassification {
+            quote_type: Some("ETF"),
+            classes_json: Some(
+                r#"[{"name":"stock","weight":0.6381},{"name":"bond","weight":1.157},{"name":"other","weight":0.32919997}]"#,
+            ),
             ..Default::default()
-        };
+        });
 
         classifier.classify_asset("asset-1", &input).await.unwrap();
 
@@ -1304,6 +1411,58 @@ mod tests {
         assert!(assignments
             .iter()
             .all(|assignment| assignment.source == AUTO_SOURCE));
+    }
+
+    #[tokio::test]
+    async fn test_auto_classification_replaces_partial_sectors_in_one_write() {
+        // A previous run that was cancelled after 4 of XEF.TO's 11 sectors.
+        let service = Arc::new(MockTaxonomyService::with_assignments(vec![
+            assignment("s60", "asset-1", "industries_gics", "60", 270, AUTO_SOURCE),
+            assignment("s25", "asset-1", "industries_gics", "25", 817, AUTO_SOURCE),
+            assignment("s15", "asset-1", "industries_gics", "15", 673, AUTO_SOURCE),
+            assignment("s30", "asset-1", "industries_gics", "30", 628, AUTO_SOURCE),
+        ]));
+        let classifier = AutoClassificationService::new(service.clone());
+        let input = ClassificationInput::from_provider_profile(ProviderProfileClassification {
+            quote_type: Some("ETF"),
+            name: Some("iShares Core MSCI EAFE IMI Index ETF"),
+            sectors_json: Some(
+                r#"[{"name":"Realestate","weight":0.027},{"name":"Consumer Cyclical","weight":0.0817},
+                {"name":"Basic Materials","weight":0.0673},{"name":"Consumer Defensive","weight":0.0628},
+                {"name":"Technology","weight":0.1113},{"name":"Communication Services","weight":0.0465},
+                {"name":"Financial Services","weight":0.2429},{"name":"Utilities","weight":0.0339},
+                {"name":"Industrials","weight":0.1939},{"name":"Energy","weight":0.0369},
+                {"name":"Healthcare","weight":0.096}]"#,
+            ),
+            ..Default::default()
+        });
+
+        classifier.classify_asset("asset-1", &input).await.unwrap();
+
+        let sectors = service.assignments_for("asset-1", "industries_gics");
+        // These weights round to 10002 bp one by one; normalized they fill exactly 100%.
+        assert_eq!(sectors.len(), 11);
+        assert_eq!(sectors.iter().map(|a| a.weight).sum::<i32>(), 10000);
+        assert!(sectors.iter().all(|a| a.source == AUTO_SOURCE));
+        // Every taxonomy is written with one replacement, never row by row.
+        assert_eq!(*service.single_assignment_writes.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_sector_assignments_merge_duplicate_gics_sectors() {
+        let input = ClassificationInput::from_provider_profile(ProviderProfileClassification {
+            sectors_json: Some(
+                r#"[{"name":"Financials","weight":0.3},{"name":"Financial Services","weight":0.2},
+                {"name":"Technology","weight":0.5}]"#,
+            ),
+            ..Default::default()
+        });
+
+        let assignment_map: BTreeMap<_, _> =
+            sector_assignments_from_input(&input).into_iter().collect();
+
+        assert_eq!(assignment_map.get("40"), Some(&5000));
+        assert_eq!(assignment_map.get("45"), Some(&5000));
     }
 
     #[tokio::test]
@@ -1502,6 +1661,7 @@ mod tests {
     struct MockTaxonomyService {
         assignments: Mutex<Vec<AssetTaxonomyAssignment>>,
         regions: Vec<Category>,
+        single_assignment_writes: Mutex<usize>,
     }
 
     impl MockTaxonomyService {
@@ -1509,6 +1669,7 @@ mod tests {
             Self {
                 assignments: Mutex::new(assignments),
                 regions: Vec::new(),
+                single_assignment_writes: Mutex::new(0),
             }
         }
 
@@ -1516,6 +1677,7 @@ mod tests {
             Self {
                 assignments: Mutex::new(Vec::new()),
                 regions,
+                single_assignment_writes: Mutex::new(0),
             }
         }
 
@@ -1633,6 +1795,7 @@ mod tests {
             &self,
             assignment: NewAssetTaxonomyAssignment,
         ) -> Result<AssetTaxonomyAssignment> {
+            *self.single_assignment_writes.lock().unwrap() += 1;
             let mut assignments = self.assignments.lock().unwrap();
             if let Some(existing) = assignments.iter_mut().find(|existing| {
                 existing.asset_id == assignment.asset_id
@@ -1662,11 +1825,32 @@ mod tests {
 
         async fn replace_asset_taxonomy_assignments(
             &self,
-            _asset_id: &str,
-            _taxonomy_id: &str,
-            _assignments: Vec<NewAssetTaxonomyAssignment>,
+            asset_id: &str,
+            taxonomy_id: &str,
+            replacement: Vec<NewAssetTaxonomyAssignment>,
         ) -> Result<Vec<AssetTaxonomyAssignment>> {
-            unimplemented!("unused in auto-classification tests")
+            let mut assignments = self.assignments.lock().unwrap();
+            assignments.retain(|existing| {
+                existing.asset_id != asset_id || existing.taxonomy_id != taxonomy_id
+            });
+            let created: Vec<AssetTaxonomyAssignment> = replacement
+                .into_iter()
+                .map(|assignment| {
+                    let id = assignment
+                        .id
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    self::assignment(
+                        &id,
+                        &assignment.asset_id,
+                        &assignment.taxonomy_id,
+                        &assignment.category_id,
+                        assignment.weight,
+                        &assignment.source,
+                    )
+                })
+                .collect();
+            assignments.extend(created.iter().cloned());
+            Ok(created)
         }
 
         async fn remove_asset_assignment(&self, id: &str) -> Result<usize> {

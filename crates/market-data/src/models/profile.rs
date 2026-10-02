@@ -46,12 +46,14 @@ pub struct AssetProfile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sector: Option<String>,
 
-    /// Sector weightings as JSON array for ETFs/Mutual Funds
+    /// Sector weightings as a JSON array for ETFs/Mutual Funds.
+    /// Providers normalize units to fractions: 1.0 = 100%. Values may exceed 1.0.
     /// Format: [{"name": "Technology", "weight": 0.30}, {"name": "Healthcare", "weight": 0.15}]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sectors: Option<String>,
 
-    /// Asset-class allocation as JSON array for ETFs/Mutual Funds
+    /// Asset-class allocation as a JSON array for ETFs/Mutual Funds.
+    /// Providers normalize units to fractions: 1.0 = 100%. Values may exceed 1.0.
     /// Format: [{"name": "stock", "weight": 0.60}, {"name": "bond", "weight": 0.35}]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asset_allocation: Option<String>,
