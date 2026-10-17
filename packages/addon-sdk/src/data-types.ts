@@ -373,6 +373,10 @@ interface InternalTransferPairRequestBase {
   destinationAmount: string | number;
   sourceCurrency: string;
   destinationCurrency: string;
+  /** @deprecated Execution-rate hint accepted for compatibility; cash amounts are authoritative.
+   * Never stored in Activity.fxRate (the activity-to-account valuation override).
+   * Derive the transfer rate from destinationAmount / sourceAmount instead.
+   */
   fxRate?: string | number | null;
   notes?: string | null;
   transferMode?: 'cash';
@@ -1046,6 +1050,8 @@ export interface IncomeSummary {
   currency: string;
   monthlyAverage: number;
   yoyGrowth: number | null;
+  /** Currencies with no exchange rate to `currency`, left out of the converted totals. */
+  unconvertedCurrencies: string[];
 }
 
 export interface DateRange {

@@ -44,16 +44,92 @@ beforeEach(() => {
   mocks.discard.mockResolvedValue(undefined);
   mocks.confirm.mockResolvedValue(undefined);
 });
-function mount(filename?: string) {
+function mount(
+  filename?: string,
+  cloud = false,
+  reactStrictMode = false,
+  onRetry?: () => Promise<void>,
+) {
   const close = vi.fn();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <QueryClientProvider client={client}>
-      <BackupImportDialog filename={filename} onClose={close} />
+      <BackupImportDialog
+        filename={filename}
+        onClose={close}
+        onRetry={onRetry}
+        displayName={cloud ? "Selected cloud backup" : undefined}
+        initialPreview={
+          cloud
+            ? {
+                id: "cloud-immutable-id",
+                summary: { accountCount: 2, activityCount: 15, createdAt: null, appVersion: null },
+              }
+            : undefined
+        }
+      />
     </QueryClientProvider>,
+    { reactStrictMode },
   );
   return { ...view, close, client };
 }
+it("keeps cloud previews immutable with no local file picker or back-to-file step", async () => {
+  const view = mount(undefined, true);
+  expect(screen.getByText("Selected cloud backup")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: copy.recovery_choose_file })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: copy.recovery_change_file })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Back" })).not.toBeInTheDocument();
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: copy.backup_restore_title })).toBeEnabled(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(view.close).toHaveBeenCalledTimes(1);
+  view.unmount();
+  expect(mocks.discard).toHaveBeenCalledWith("cloud-immutable-id");
+  expect(mocks.choose).not.toHaveBeenCalled();
+  expect(mocks.inspect).not.toHaveBeenCalled();
+});
+it("keeps a cloud preview through the development StrictMode remount", async () => {
+  mount(undefined, true, true);
+  const restore = screen.getByRole("button", { name: copy.backup_restore_title });
+  await waitFor(() => expect(restore).toBeEnabled());
+  expect(mocks.discard).not.toHaveBeenCalled();
+  fireEvent.click(restore);
+  await waitFor(() => expect(mocks.confirm).toHaveBeenCalledWith("cloud-immutable-id"));
+  expect(mocks.discard).not.toHaveBeenCalled();
+});
+it("does not reuse a consumed cloud preview after restore failure", async () => {
+  mocks.confirm.mockRejectedValueOnce(new Error("Expired backup preview"));
+  const view = mount(undefined, true);
+  const restore = screen.getByRole("button", { name: copy.backup_restore_title });
+  await waitFor(() => expect(restore).toBeEnabled());
+  fireEvent.click(restore);
+  await screen.findByRole("alert");
+  expect(restore).toBeDisabled();
+  expect(screen.getByText("Selected cloud backup")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: copy.recovery_choose_file })).not.toBeInTheDocument();
+  fireEvent.click(restore);
+  expect(mocks.confirm).toHaveBeenCalledTimes(1);
+  expect(mocks.confirm).toHaveBeenCalledWith("cloud-immutable-id");
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(view.close).toHaveBeenCalledTimes(1);
+});
+it("offers to check a used cloud preview again instead of a disabled restore", async () => {
+  mocks.confirm.mockRejectedValueOnce(
+    new Error("This backup preview has expired or is unavailable"),
+  );
+  const retry = vi.fn().mockResolvedValue(undefined);
+  mount(undefined, true, false, retry);
+  const restore = screen.getByRole("button", { name: copy.backup_restore_title });
+  await waitFor(() => expect(restore).toBeEnabled());
+  fireEvent.click(restore);
+  await screen.findByRole("alert");
+  const again = screen.getByRole("button", { name: "Retry" });
+  expect(again).toBeEnabled();
+  fireEvent.click(again);
+  await waitFor(() => expect(retry).toHaveBeenCalledOnce());
+  expect(mocks.confirm).toHaveBeenCalledTimes(1);
+});
 it("validates the selected snapshot before confirming its immutable ID once", async () => {
   mount("old.db");
   fireEvent.click(screen.getByRole("button", { name: copy.recovery_inspect }));
@@ -157,4 +233,11 @@ it("keeps the mobile sheet open and blocks navigation while restoring", async ()
   } finally {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: originalWidth });
   }
+});
+it("wraps the explanation and truncates only a backup name", () => {
+  const local = mount("/backups/backup.wfbackup");
+  expect(screen.getByText(copy.backup_import_description)).not.toHaveClass("truncate");
+  local.unmount();
+  mount(undefined, true);
+  expect(screen.getByText("Selected cloud backup")).toHaveClass("truncate");
 });

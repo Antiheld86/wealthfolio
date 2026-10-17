@@ -14,7 +14,8 @@ import { useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { DateRange } from "react-day-picker";
 
-import { createActivity, deleteActivity, updateActivity } from "@/adapters";
+import { createActivity, deleteActivity, saveActivities, updateActivity } from "@/adapters";
+import { localizeActivityTypeName } from "@/lib/activity-utils";
 import { generateId } from "@/lib/id";
 import { useAccounts } from "@/hooks/use-accounts";
 import { useIsMobileViewport } from "@/hooks/use-platform";
@@ -45,6 +46,9 @@ import { CashActivityForm } from "./cash-activity-form";
 import { ActivityForm } from "@/pages/activity/components/activity-form";
 import { MobileActivityForm } from "@/pages/activity/components/mobile-forms/mobile-activity-form";
 import { TransferMatchDialog } from "@/pages/activity/components/transfer-match-dialog";
+import { attachTransferCounterpart } from "@/pages/activity/utils/transfer-counterpart";
+import { buildSameAccountFxDuplicate } from "@/pages/activity/utils/duplicate-fx-transfer";
+import { ActivityLoanPaymentSheet } from "@/pages/asset/alternative-assets/components/activity-loan-payment-sheet";
 import { getActivityRestrictionLevel } from "@/lib/activity-restrictions";
 import { ActivityType } from "@/lib/constants";
 import type { AmountRange } from "./amount-range-filter";
@@ -59,7 +63,6 @@ import { TransactionsFilterBar, type FilterOption } from "./transactions-filter-
 import type { QuickCategorizeScope } from "./quick-categorize-popover";
 import {
   CASH_ACTIVITY_TYPES,
-  CASH_ACTIVITY_TYPE_LABELS,
   getEffectiveCashActivityType,
   isCreditCardAccountType,
   isSpendingAccountType,
@@ -175,7 +178,7 @@ export interface SpendingTransactionsTabHandle {
   openAddForm: () => void;
 }
 
-function toActivityDetails(row: TransactionRowVM, account?: Account): Partial<ActivityDetails> {
+function toActivityDetails(row: TransactionRowVM, account?: Account): ActivityDetails {
   const activity = row.activity;
   const activityType = getEffectiveCashActivityType(activity);
   return {
@@ -243,6 +246,7 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
       mode: "link" | "unlink";
       row: TransactionRowVM | null;
     }>({ open: false, mode: "link", row: null });
+    const [loanPaymentRow, setLoanPaymentRow] = useState<TransactionRowVM | null>(null);
     const [deletingIds, setDeletingIds] = useState<string[] | null>(null);
     const [deletePreview, setDeletePreview] = useState<DeletePreview | undefined>();
 
@@ -379,7 +383,8 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
     /**
      * Mobile only. The card list hides its checkboxes until the user asks to
      * select, the way a phone list normally does — a checkbox on every row is a
-     * permanent cost for an occasional task. The table always shows them.
+     * permanent cost for an occasional task. The table has hover and keyboard
+     * focus, so it reveals each row's checkbox on those instead.
      */
     const [selectionMode, setSelectionMode] = useState(false);
 
@@ -489,6 +494,8 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
         maxAmount: amountRange.max ?? undefined,
         sortBy: "date",
         sortDir: "desc",
+        // Filled only when the search covers exactly one account.
+        includeCashBalances: true,
       };
     }, [
       debouncedSearch,
@@ -517,6 +524,9 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
       fetchNextPage,
       refetch,
     } = useCashActivitySearch(searchRequest);
+    // Rows carry a balance only when the search covers one cash or
+    // credit-card account, so their presence decides the column.
+    const showBalance = useMemo(() => items.some((item) => item.cashBalance != null), [items]);
 
     const accountById = useMemo(() => {
       const m = new Map<string, Account>();
@@ -608,6 +618,14 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
 
     const { mutate: duplicateTransaction } = useMutation({
       mutationFn: async (row: TransactionRowVM) => {
+        const exchange = await buildSameAccountFxDuplicate(toActivityDetails(row));
+        if (exchange) {
+          const result = await saveActivities({ creates: exchange });
+          if (result.errors.length || result.created.length !== 2) {
+            throw new Error("Failed duplicating transfer pair.");
+          }
+          return result.created[0];
+        }
         const a = row.activity;
         const activityType = getEffectiveCashActivityType(a);
         const supportsBoundary =
@@ -627,9 +645,8 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
           currency: a.currency,
           fxRate: a.fxRate ?? undefined,
           amount: a.amount,
-          activityDate:
-            typeof a.activityDate === "string" ? a.activityDate : new Date().toISOString(),
-          comment: t("spending:txTab.duplicatedComment"),
+          activityDate: new Date().toISOString(),
+          comment: a.notes,
           metadata:
             activityType === ActivityType.CREDIT
               ? cashActivityFlowMetadata(activityType, a.subtype, boundaryMetadata)
@@ -786,11 +803,16 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
     );
 
     const handleEditRow = useCallback(
-      (row: TransactionRowVM) => {
+      async (row: TransactionRowVM) => {
         if (isTransferCashActivity(row.activity)) {
           setEditingActivity(undefined);
           setShowForm(false);
-          setTransferFormActivity(toActivityDetails(row, accountById.get(row.activity.accountId)));
+          // Load the paired leg so the form pre-fills "To Account" (#1563).
+          setTransferFormActivity(
+            await attachTransferCounterpart(
+              toActivityDetails(row, accountById.get(row.activity.accountId)),
+            ),
+          );
           setShowTransferForm(true);
           return;
         }
@@ -867,11 +889,11 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
 
     const typeOptions = useMemo<FilterOption[]>(
       () =>
-        CASH_ACTIVITY_TYPES.map((t) => ({
-          value: t,
-          label: CASH_ACTIVITY_TYPE_LABELS[t],
+        CASH_ACTIVITY_TYPES.map((type) => ({
+          value: type,
+          label: localizeActivityTypeName(t, type),
         })),
-      [],
+      [t],
     );
     const accountOptions = useMemo<FilterOption[]>(
       () => spendingAccounts.map((a) => ({ value: a.id, label: a.name })),
@@ -1006,6 +1028,7 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
         onDelete: handleDeleteRow,
         onLinkTransfer: handleLinkTransfer,
         onUnlinkTransfer: handleUnlinkTransfer,
+        onLoanPayment: setLoanPaymentRow,
       };
     };
 
@@ -1058,7 +1081,11 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
       <>
         {firstItemStart > 0 && (
           <TableRow aria-hidden className="hover:bg-transparent">
-            <TableCell colSpan={6} className="p-0" style={{ height: firstItemStart }} />
+            <TableCell
+              colSpan={showBalance ? 7 : 6}
+              className="p-0"
+              style={{ height: firstItemStart }}
+            />
           </TableRow>
         )}
         {virtualItems.map((virtualItem) => {
@@ -1074,6 +1101,7 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
               selectionState={daySelectionState(item.group)}
               onToggleDay={handleToggleDay}
               isPartial={hasNextPage === true && item.isLastGroup}
+              showBalance={showBalance}
             />
           ) : (
             <TransactionRow
@@ -1082,12 +1110,17 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
               data-index={virtualItem.index}
               {...sharedRowProps(item.row)}
               showAccount={showAccount}
+              showBalance={showBalance}
             />
           );
         })}
         {totalSize - lastItemEnd > 0 && (
           <TableRow aria-hidden className="hover:bg-transparent">
-            <TableCell colSpan={6} className="p-0" style={{ height: totalSize - lastItemEnd }} />
+            <TableCell
+              colSpan={showBalance ? 7 : 6}
+              className="p-0"
+              style={{ height: totalSize - lastItemEnd }}
+            />
           </TableRow>
         )}
       </>
@@ -1215,10 +1248,18 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
             {loadMoreTrigger && <div className="flex justify-center pt-1">{loadMoreTrigger}</div>}
           </div>
         ) : (
-          <div className="rounded-md border" style={{ overflowAnchor: "none" }}>
+          // Row checkboxes show on hover or focus until something is selected,
+          // then on every row; `data-selecting` is what switches them on.
+          <div
+            className="group/list rounded-md border"
+            data-selecting={selectedRowIds.size > 0 || undefined}
+            style={{ overflowAnchor: "none" }}
+          >
             <Table>
-              <TableHeader>
+              <TableHeader className="bg-muted-foreground/5">
                 <TableRow>
+                  {/* Select-all stays visible: with the row boxes hidden at
+                      rest, it is what shows the list can be selected. */}
                   <TableHead className="w-10 px-3">
                     <Checkbox
                       checked={
@@ -1240,6 +1281,11 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
                     {t("spending:filters.category")}
                   </TableHead>
                   <TableHead className="w-28 px-3 text-right">{t("common:amount")}</TableHead>
+                  {showBalance && (
+                    <TableHead className="hidden w-28 px-3 text-right sm:table-cell">
+                      {t("activity:table_balance")}
+                    </TableHead>
+                  )}
                   <TableHead className="w-10 px-3" />
                 </TableRow>
               </TableHeader>
@@ -1322,6 +1368,15 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
           }
           onComplete={refetch}
         />
+
+        {loanPaymentRow && (
+          <ActivityLoanPaymentSheet
+            open
+            activity={loanPaymentRow.activity}
+            onOpenChange={(open) => !open && setLoanPaymentRow(null)}
+            onChanged={refetch}
+          />
+        )}
       </div>
     );
   },

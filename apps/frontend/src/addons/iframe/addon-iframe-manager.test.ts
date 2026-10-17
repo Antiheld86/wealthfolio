@@ -94,6 +94,43 @@ describe("AddonIframeManager", () => {
     vi.unstubAllGlobals();
   });
 
+  it("awaits resource cleanup after failed boot before starting a replacement", async () => {
+    const manager = new AddonIframeManager();
+    let releaseCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const onStopped = vi.fn(() => cleanup);
+    const starting = manager.startAddon({ ...input, onStopped });
+    const rejected = expect(starting).rejects.toThrow("broken build");
+    await vi.waitFor(() => expect(document.querySelector("iframe")).not.toBeNull());
+    dispatchFromSandbox(getSandboxFrame(), "loadError", { error: "broken build" });
+    await vi.waitFor(() => expect(onStopped).toHaveBeenCalledTimes(1));
+    expect(manager.hasRuntime(input.addonId)).toBe(false);
+
+    const replacing = manager.startAddon(input);
+    const cancelled = expect(replacing).rejects.toMatchObject({ name: "AddonLoadCancelled" });
+    await Promise.resolve();
+    expect(document.querySelector("iframe")).toBeNull();
+    releaseCleanup();
+    await rejected;
+    await vi.waitFor(() => expect(document.querySelector("iframe")).not.toBeNull());
+    await manager.stopAllAddons();
+    await cancelled;
+    expect(onStopped).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases runtime resources during global teardown", async () => {
+    const manager = new AddonIframeManager();
+    const onStopped = vi.fn().mockResolvedValue(undefined);
+    const starting = manager.startAddon({ ...input, onStopped });
+    const cancelled = expect(starting).rejects.toMatchObject({ name: "AddonLoadCancelled" });
+    await vi.waitFor(() => expect(document.querySelector("iframe")).not.toBeNull());
+    await manager.stopAllAddons();
+    await cancelled;
+    expect(onStopped).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects a stale boot before it can touch the current runtime", async () => {
     const manager = new AddonIframeManager();
     const isCurrent = vi.fn(() => false);
@@ -125,6 +162,37 @@ describe("AddonIframeManager", () => {
         localization: { locale: "ko-KR", uiLocale: "fr", timezone: "Asia/Seoul" },
         type: "localizationUpdate",
       }),
+      "*",
+    );
+
+    const withCurrencyFormats = {
+      locale: "ko-KR",
+      uiLocale: "fr",
+      timezone: "Asia/Seoul",
+      currencyFormattingRegions: { INR: "IN", USD: "DE" },
+    };
+    postMessage.mockClear();
+    setAddonLocalizationSnapshot(withCurrencyFormats);
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ localization: withCurrencyFormats, type: "localizationUpdate" }),
+      "*",
+    );
+
+    // Settings refetches may rebuild the same map in a different insertion order.
+    postMessage.mockClear();
+    setAddonLocalizationSnapshot({
+      ...withCurrencyFormats,
+      currencyFormattingRegions: { USD: "DE", INR: "IN" },
+    });
+    expect(postMessage).not.toHaveBeenCalled();
+
+    const changedCurrencyFormats = {
+      ...withCurrencyFormats,
+      currencyFormattingRegions: { USD: "US", INR: "IN" },
+    };
+    setAddonLocalizationSnapshot(changedCurrencyFormats);
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ localization: changedCurrencyFormats, type: "localizationUpdate" }),
       "*",
     );
 

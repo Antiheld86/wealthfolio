@@ -3,6 +3,7 @@
 //! This module provides REST endpoints for syncing broker accounts and activities
 //! from the Wealthfolio Connect cloud service.
 
+#[cfg(feature = "device-sync")]
 use std::future::Future;
 use std::sync::Arc;
 use wealthfolio_core::settings::SettingsServiceTrait;
@@ -127,7 +128,7 @@ fn cloud_api_base_url() -> ApiResult<String> {
     })
 }
 
-fn connect_auth_url() -> Option<String> {
+pub(super) fn connect_auth_url() -> Option<String> {
     std::env::var("CONNECT_AUTH_URL")
         .ok()
         .map(|v| v.trim().trim_end_matches('/').to_string())
@@ -351,13 +352,14 @@ async fn store_sync_session(
         .await
         .map_err(ApiError::Forbidden)?;
 
+    state.backup_scheduler.wake();
     Ok(Json(()))
 }
 
 async fn post_login_bootstrap(
     axum::Extension(state): axum::Extension<Arc<AppState>>,
 ) -> ApiResult<Json<PostLoginBootstrapResult>> {
-    let broker_sync = run_post_login_broker_bootstrap(Arc::clone(&state)).await;
+    let broker_sync = run_broker_bootstrap(Arc::clone(&state)).await;
     let device_sync = run_post_login_device_bootstrap(state).await;
 
     Ok(Json(PostLoginBootstrapResult {
@@ -366,7 +368,7 @@ async fn post_login_bootstrap(
     }))
 }
 
-async fn run_post_login_broker_bootstrap(state: Arc<AppState>) -> PostLoginBootstrapSyncResult {
+pub(crate) async fn run_broker_bootstrap(state: Arc<AppState>) -> PostLoginBootstrapSyncResult {
     let entitlement_state = Arc::clone(&state);
     let connections_state = Arc::clone(&state);
     let guard_state = Arc::clone(&state);
@@ -394,10 +396,10 @@ async fn run_post_login_broker_bootstrap(state: Arc<AppState>) -> PostLoginBoots
     tokio::spawn(async move {
         match perform_broker_sync_with_guard(&state, guard).await {
             Ok(_result) => {
-                info!("[Connect] Post-login broker sync completed successfully");
+                info!("[Connect] Broker bootstrap sync completed successfully");
             }
             Err(err) => {
-                error!("[Connect] Post-login broker sync failed: {}", err);
+                error!("[Connect] Broker bootstrap sync failed: {}", err);
             }
         }
     });
@@ -476,6 +478,7 @@ async fn clear_sync_session(
 }
 
 async fn disconnect_cloud_session(state: &AppState) -> Result<(), String> {
+    state.backup_scheduler.wake();
     state
         .token_lifecycle
         .clear_session_with(state.secret_store.as_ref(), || async {
@@ -491,7 +494,9 @@ async fn disconnect_cloud_session(state: &AppState) -> Result<(), String> {
             state.device_sync_runtime.ensure_background_stopped().await;
         })
         .await
-        .map(|_| ())
+        .map(|_| {
+            state.backup_scheduler.wake();
+        })
         .map_err(|err| err.to_string())
 }
 

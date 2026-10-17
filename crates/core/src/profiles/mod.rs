@@ -79,6 +79,11 @@ pub enum ProfileError {
     Cooldown(u64),
     #[error("PROFILE_UNAVAILABLE: {0}")]
     Unavailable(String),
+    #[error("PROFILE_UNAVAILABLE: Profile storage failed ({kind:?}, OS error {os_code:?}).")]
+    StorageIo {
+        kind: std::io::ErrorKind,
+        os_code: Option<i32>,
+    },
     #[error("CONNECT_PROFILE_EXISTS: This Connect account belongs to profile {0}.")]
     DuplicateIdentity(Uuid),
     #[error("CONNECT_IDENTITY_MISMATCH: Reconnect the original Connect account.")]
@@ -109,6 +114,8 @@ pub struct Profile {
     #[serde(default)]
     pub(crate) never_protected: bool,
     /// Only the migrated default may own the pre-profile namespace and database.
+    /// Hosts retain this saved path unless they explicitly override it in memory
+    /// to follow a moved mobile sandbox.
     pub legacy_database: Option<PathBuf>,
     #[serde(default)]
     pub legacy_addons_root: Option<PathBuf>,

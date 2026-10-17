@@ -5,15 +5,12 @@ use wealthfolio_core::secrets::SYNC_IDENTITY_KEY;
 use wealthfolio_core::settings::SettingsServiceTrait;
 
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::main_lib::AppState;
 use wealthfolio_core::events::DomainEvent;
-use wealthfolio_core::sync::{
-    snapshot_covers_cursor_and_schema, APP_SYNC_TABLES, SNAPSHOT_SCHEMA_VERSION,
-};
+use wealthfolio_core::sync::{APP_SYNC_TABLES, SNAPSHOT_SCHEMA_VERSION};
 use wealthfolio_device_sync::engine::{
     self, CredentialStore, OutboxStore, ReplayEvent, ReplayStore, RestoreFile, RestoreOperation,
     RestorePorts, StartRestore, SyncIdentity, SyncTransport, TransportError,
@@ -30,7 +27,9 @@ fn transport_err_from_sync(e: wealthfolio_device_sync::DeviceSyncError) -> Trans
         retry_class: e.retry_class(),
         error_code: e.error_code().map(|s| s.to_string()),
         details: match &e {
-            wealthfolio_device_sync::DeviceSyncError::Api { details, .. } => details.clone(),
+            wealthfolio_device_sync::DeviceSyncError::Api { details, .. } => {
+                details.as_deref().cloned()
+            }
             _ => None,
         },
     }
@@ -52,11 +51,6 @@ impl SyncApprovals {
 }
 
 const SYNC_SOURCE_RESTORE_REQUIRED_CODE: &str = "SYNC_SOURCE_RESTORE_REQUIRED";
-
-fn is_snapshot_index_conflict(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    message.contains("sync_transaction_failed") && message.contains("snapshot index conflict")
-}
 
 fn is_pairing_already_confirmed_error(err: &wealthfolio_device_sync::DeviceSyncError) -> bool {
     match err {
@@ -589,7 +583,67 @@ pub async fn run_sync_cycle(
     Ok(result)
 }
 
+pub(crate) async fn share_backup_access(state: &Arc<AppState>) -> Result<(), String> {
+    if !get_sync_identity_from_store(state).is_some_and(|i| sync_identity_can_run_background(&i)) {
+        return Ok(());
+    }
+    if let (Some(url), Ok(token)) = (
+        crate::features::cloud_api_base_url(),
+        crate::api::connect::mint_access_token(state).await,
+    ) {
+        if let Ok(client) = wealthfolio_device_sync::backups::client::BackupClient::new(&url) {
+            let result = async {
+                let policy = client.policy(&token).await?;
+                let material = {
+                    let _guard = state.profile_lifecycle.lock().await;
+                    if !get_sync_identity_from_store(state)
+                        .is_some_and(|i| sync_identity_can_run_background(&i))
+                    {
+                        return Ok(());
+                    }
+                    wealthfolio_device_sync::backups::client::BackupClient::access_material(
+                        state.secret_store.as_ref(),
+                        &policy,
+                    )?
+                };
+                let resolved = client.resolve_access(&token, material).await?;
+                let gained_access = resolved.restores_local_access();
+                let _guard = state.profile_lifecycle.lock().await;
+                if let Some((registry, id)) = state.profile_binding.get() {
+                    if registry.profile(*id).is_err() {
+                        return Ok(());
+                    }
+                }
+                resolved.apply(state.secret_store.as_ref())?;
+                if gained_access {
+                    state.backup_scheduler.request_check();
+                }
+                Ok::<(), wealthfolio_device_sync::DeviceSyncError>(())
+            }
+            .await;
+            if result.is_err() {
+                if let Err(error) = result {
+                    if wealthfolio_device_sync::backups::client::BackupClient::is_key_conflict(
+                        &error,
+                    ) {
+                        return Err(error.to_string());
+                    }
+                }
+                tracing::warn!("Backup access sharing unavailable; retry on a linked device");
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn ensure_background_engine_started(state: Arc<AppState>) -> Result<(), String> {
+    if start_background_engine_if_ready(Arc::clone(&state)).await? {
+        let _ = share_backup_access(&state).await;
+    }
+    Ok(())
+}
+
+async fn start_background_engine_if_ready(state: Arc<AppState>) -> Result<bool, String> {
     let _lifecycle = state.profile_lifecycle.lock().await;
     if let Some((registry, id)) = state.profile_binding.get() {
         registry.profile(*id).map_err(|e| e.to_string())?;
@@ -600,27 +654,29 @@ pub async fn ensure_background_engine_started(state: Arc<AppState>) -> Result<()
         .requires_cloud_reconnect()
         .map_err(|e| e.to_string())?
     {
-        return Ok(());
+        return Ok(false);
     }
     let has_session = state
         .token_lifecycle
         .is_session_configured(state.secret_store.as_ref())
         .map_err(|err| err.to_string())?;
     if !has_session {
-        return Ok(());
+        return Ok(false);
     }
     let Some(identity) = get_sync_identity_from_store(&state) else {
-        return Ok(());
+        return Ok(false);
     };
     if !sync_identity_can_run_background(&identity) {
-        return Ok(());
+        return Ok(false);
     }
+    let starting = !state.device_sync_runtime.is_background_running().await;
     let ports = Arc::new(ServerEnginePorts::new(Arc::clone(&state)));
     state
         .device_sync_runtime
         .ensure_background_started(ports)
         .await;
-    Ok(())
+    drop(_lifecycle);
+    Ok(starting)
 }
 
 pub async fn ensure_background_engine_stopped(state: Arc<AppState>) -> Result<(), String> {
@@ -687,7 +743,12 @@ pub async fn generate_snapshot_now(
         ));
     }
 
-    let local_cursor = state.app_sync_repository.get_cursor().ok();
+    let local_cursor = Some(
+        state
+            .app_sync_repository
+            .get_cursor()
+            .map_err(|e| format!("Snapshot cursor unavailable: {e}"))?,
+    );
     let server_cursor = create_client()
         .get_events_cursor(&token, &device_id)
         .await
@@ -696,27 +757,8 @@ pub async fn generate_snapshot_now(
     if local_cursor.is_some_and(|cursor| cursor > server_cursor) {
         return Err(sync_source_restore_required_error());
     }
-    if let Some(cursor) = local_cursor {
-        if let Ok(Some(latest_snapshot)) = create_client()
-            .get_latest_snapshot_with_cursor_fallback(&token, &device_id)
-            .await
-        {
-            if snapshot_covers_cursor_and_schema(
-                latest_snapshot.oplog_seq,
-                latest_snapshot.schema_version,
-                cursor,
-                SNAPSHOT_SCHEMA_VERSION,
-            ) {
-                return Ok(SyncSnapshotUploadResult {
-                    status: "uploaded".to_string(),
-                    snapshot_id: Some(latest_snapshot.snapshot_id),
-                    oplog_seq: Some(latest_snapshot.oplog_seq),
-                    message: "Latest remote snapshot already covers current cursor".to_string(),
-                });
-            }
-        }
-    }
-
+    // Broker holdings and provider quotes can change without an outbox event.
+    // A matching event cursor cannot prove that a remote snapshot is current.
     let sync_tables = APP_SYNC_TABLES
         .iter()
         .map(|value| value.to_string())
@@ -742,10 +784,15 @@ pub async fn generate_snapshot_now(
         ));
     }
 
-    let encoded_snapshot = BASE64_STANDARD.encode(sqlite_bytes);
-    let encrypted_snapshot_payload =
-        encrypt_sync_payload(&encoded_snapshot, &identity, key_version)?;
-    let payload = encrypted_snapshot_payload.into_bytes();
+    let payload = wealthfolio_device_sync::snapshot::encode(
+        &sqlite_bytes,
+        identity
+            .root_key
+            .as_deref()
+            .ok_or("Missing sync root key")?,
+        key_version,
+    )?;
+    drop(sqlite_bytes);
     let checksum = sha256_checksum(&payload);
     let metadata_payload = encrypt_sync_payload(
         &serde_json::json!({
@@ -768,7 +815,6 @@ pub async fn generate_snapshot_now(
     let upload_headers = wealthfolio_device_sync::SnapshotUploadHeaders {
         event_id: Some(Uuid::now_v7().to_string()),
         schema_version: SNAPSHOT_SCHEMA_VERSION,
-        covers_tables: APP_SYNC_TABLES.iter().map(|v| v.to_string()).collect(),
         size_bytes: payload.len() as i64,
         checksum,
         metadata_payload,
@@ -778,7 +824,12 @@ pub async fn generate_snapshot_now(
 
     let upload_result = create_client()
         .upload_snapshot_with_cancel_flag(
-            &token,
+            || async {
+                crate::api::connect::mint_access_token(&state)
+                    .await
+                    .map_err(|e| e.to_string())
+                    .map_err(wealthfolio_device_sync::DeviceSyncError::Auth)
+            },
             &device_id,
             upload_headers,
             payload,
@@ -794,35 +845,7 @@ pub async fn generate_snapshot_now(
                     "Snapshot upload cancelled during transfer",
                 ));
             }
-            if is_snapshot_index_conflict(&message) {
-                let latest = create_client()
-                    .get_latest_snapshot_with_cursor_fallback(&token, &device_id)
-                    .await
-                    .ok()
-                    .flatten();
-                if let (Some(cursor), Some(snapshot)) = (local_cursor, latest) {
-                    if snapshot_covers_cursor_and_schema(
-                        snapshot.oplog_seq,
-                        snapshot.schema_version,
-                        cursor,
-                        SNAPSHOT_SCHEMA_VERSION,
-                    ) {
-                        tracing::info!(
-                            "[DeviceSync] Snapshot conflict resolved by existing remote snapshot id={} oplog_seq={} cursor={}",
-                            snapshot.snapshot_id,
-                            snapshot.oplog_seq,
-                            cursor
-                        );
-                        return Ok(SyncSnapshotUploadResult {
-                            status: "uploaded".to_string(),
-                            snapshot_id: Some(snapshot.snapshot_id),
-                            oplog_seq: Some(snapshot.oplog_seq),
-                            message: "Latest remote snapshot already covers current cursor"
-                                .to_string(),
-                        });
-                    }
-                }
-            }
+
             return Err(message);
         }
     };
@@ -856,18 +879,7 @@ pub async fn complete_pairing_with_transfer(
         .clone()
         .ok_or_else(|| "No device ID configured".to_string())?;
 
-    // 1. Run sync cycle to flush any pending outbox events
-    tracing::info!("[DeviceSync] complete_pairing_with_transfer: running sync cycle");
-    let _cycle_result = run_sync_cycle(Arc::clone(&state), false).await?;
-
-    // 2. Generate snapshot (full local SQLite export — always contains all local data)
-    tracing::info!("[DeviceSync] complete_pairing_with_transfer: generating snapshot");
-    let snapshot = generate_snapshot_now(Arc::clone(&state)).await?;
-    if snapshot.status != "uploaded" {
-        return Err(format!("Snapshot upload failed: {}", snapshot.message));
-    }
-
-    // 3. Approve pairing (idempotent if already approved)
+    // 1. Approve pairing (idempotent if already approved)
     let token = crate::api::connect::mint_access_token(&state)
         .await
         .map_err(|e| e.to_string())?;
@@ -879,7 +891,13 @@ pub async fn complete_pairing_with_transfer(
     {
         Ok(_) => {}
         Err(e) => {
-            if is_pairing_already_approved_error(&e) {
+            // A retry after a failed upload may already have approved this session.
+            if is_pairing_already_approved_error(&e)
+                || matches!(
+                    client.get_pairing(&token, &device_id, &pairing_id).await,
+                    Ok(session) if session.status == wealthfolio_device_sync::PairingStatus::Approved
+                )
+            {
                 tracing::info!(
                     "[DeviceSync] approve_pairing already done, continuing: {}",
                     e
@@ -890,11 +908,28 @@ pub async fn complete_pairing_with_transfer(
         }
     }
 
-    // 4. Complete pairing (send encrypted key bundle)
+    // 2. Run sync cycle to flush any pending outbox events
+    tracing::info!("[DeviceSync] complete_pairing_with_transfer: running sync cycle");
+    let _cycle_result = run_sync_cycle(Arc::clone(&state), false).await?;
+
+    // 3. Generate snapshot (full local SQLite export — always contains all local data)
+    tracing::info!("[DeviceSync] complete_pairing_with_transfer: generating snapshot");
+    let snapshot = generate_snapshot_now(Arc::clone(&state)).await?;
+    if snapshot.status != "uploaded" {
+        return Err(format!("Snapshot upload failed: {}", snapshot.message));
+    }
+
+    let _ = share_backup_access(&state).await;
+
+    // 4. Complete pairing (send encrypted key bundle with current credentials)
     tracing::info!("[DeviceSync] complete_pairing_with_transfer: completing pairing");
     client
         .complete_pairing(
-            &token,
+            || async {
+                crate::api::connect::mint_access_token(&state)
+                    .await
+                    .map_err(|e| wealthfolio_device_sync::DeviceSyncError::Auth(e.to_string()))
+            },
             &device_id,
             &pairing_id,
             wealthfolio_device_sync::CompletePairingRequest {
@@ -995,6 +1030,16 @@ impl RestorePorts for ServerEnginePorts {
         }
     }
 
+    async fn snapshot_is_empty(&self, image: Vec<u8>) -> Result<bool, String> {
+        tokio::task::spawn_blocking(move || {
+            let image = zeroize::Zeroizing::new(image);
+            wealthfolio_storage_sqlite::db::cloud_backups::snapshot_is_empty(&image)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
     fn local_rows(&self) -> Result<i64, String> {
         self.state
             .app_sync_repository
@@ -1057,10 +1102,16 @@ impl RestorePorts for ServerEnginePorts {
                 tracing::warn!("[DeviceSync] Post-restore sync cycle failed: {}", error);
             }
         }
-        ensure_background_engine_started(Arc::clone(&self.state)).await
+        start_background_engine_if_ready(Arc::clone(&self.state)).await?;
+        let _ = share_backup_access(&self.state).await;
+        Ok(())
     }
 
     fn refresh_portfolio(&self) {
+        let state = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            super::connect::run_broker_bootstrap(state).await;
+        });
         // The same signal a sync pull sends: the portfolio pipeline recalculates
         // and reports its own progress and errors.
         self.state

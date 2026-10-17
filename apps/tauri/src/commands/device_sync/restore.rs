@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use log::{info, warn};
 use tauri::AppHandle;
-use wealthfolio_core::quotes::MarketSyncMode;
+use wealthfolio_core::events::DomainEvent;
 use wealthfolio_device_sync::engine::{
     RestoreFile, RestoreOperation, RestorePorts, StartRestore, TransportError,
 };
@@ -17,8 +17,7 @@ use wealthfolio_device_sync::{SnapshotDownloadHeaders, SnapshotLatestResponse};
 use wealthfolio_storage_sqlite::db;
 
 use super::engine::{
-    ensure_background_engine_started, run_sync_cycle, transport_err_from_sync,
-    transport_err_permanent, RestoreHost, TauriEnginePorts,
+    run_sync_cycle, transport_err_from_sync, transport_err_permanent, RestoreHost, TauriEnginePorts,
 };
 use super::{
     clear_min_snapshot_created_at_from_store, create_client, get_access_token,
@@ -26,7 +25,6 @@ use super::{
     is_pairing_already_confirmed_error, set_min_snapshot_created_at_in_store,
 };
 use crate::context::ServiceContext;
-use crate::events::{emit_portfolio_trigger_recalculate, PortfolioRequestPayload};
 use crate::profiles::ConnectAccess;
 
 const DEVICE_SYNC_RESTORE_EVENT: &str = "device-sync:restore-operation";
@@ -112,6 +110,16 @@ impl RestorePorts for TauriEnginePorts {
         }
     }
 
+    async fn snapshot_is_empty(&self, image: Vec<u8>) -> Result<bool, String> {
+        tokio::task::spawn_blocking(move || {
+            let image = zeroize::Zeroizing::new(image);
+            wealthfolio_storage_sqlite::db::cloud_backups::snapshot_is_empty(&image)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
     fn local_rows(&self) -> Result<i64, String> {
         self.context
             .app_sync_repository()
@@ -171,20 +179,24 @@ impl RestorePorts for TauriEnginePorts {
                 warn!("[DeviceSync] Post-restore sync cycle failed: {}", error);
             }
         }
-        ensure_background_engine_started(Arc::clone(&self.context)).await
+        super::engine::start_background_engine_if_ready(Arc::clone(&self.context)).await?;
+        let _ = super::share_backup_access(&self.context).await;
+        Ok(())
     }
 
     fn refresh_portfolio(&self) {
         if let Ok(host) = self.host() {
-            emit_portfolio_trigger_recalculate(
-                &host.handle,
-                PortfolioRequestPayload::builder()
-                    .account_ids(None)
-                    .market_sync_mode(MarketSyncMode::Incremental { asset_ids: None })
-                    .build(),
-                &self.context,
-            );
+            let app = host.handle.clone();
+            let context = Arc::clone(&self.context);
+            tauri::async_runtime::spawn(async move {
+                crate::commands::wealthfolio_connect::run_broker_bootstrap(app, context).await;
+            });
         }
+        // Reuse the queued sync-pull pipeline: it recalculates with restored
+        // quotes even when a market provider is unavailable.
+        self.context
+            .domain_event_sink
+            .emit(DomainEvent::device_sync_pull_complete());
     }
 
     fn publish_restore(&self, operation: &RestoreOperation) {

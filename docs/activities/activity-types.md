@@ -193,9 +193,11 @@ cash FX conversion within the same account is a narrow exception:
 - Account-level `net_contribution` and `net_contribution_base` do not change.
 - No external portfolio flow or TWR cash-flow event is created.
 
-This exception uses Wealthfolio's qualified FX-pair recognition. Same-account
-transfers or transfers that merely share a group identifier are not
-automatically contribution-neutral.
+The pair is recognized when its two cash legs are in the same account, in
+different currencies, linked by one group identifier, and both explicitly
+internal (`flow.is_external: false`). The transfer form, the transfer link and
+the import linker record pairs that way. Legs that merely share a group
+identifier, without that mark, are not contribution-neutral.
 
 #### TRANSFER_IN
 
@@ -268,7 +270,7 @@ described above.
 | -------------------- | --------------------------------------------------- |
 | **Cash**             | Increases by `amount` in activity currency          |
 | **Holdings**         | No change (unless DRIP or DIVIDEND_IN_KIND subtype) |
-| **Cost Basis**       | No change                                           |
+| **Cost Basis**       | No change (unless RETURN_OF_CAPITAL subtype)        |
 | **Net Contribution** | No change (income, not new capital)                 |
 
 **Required Fields**: `asset`, `amount`, `currency` **Optional Fields**: `fee`,
@@ -316,6 +318,11 @@ described above.
 | `REBATE`  | No change        | Reduced trading cost, not new capital       |
 | `REFUND`  | No change        | Reversal of existing fee, not new capital   |
 | (default) | No change        | Internal adjustment                         |
+
+`metadata.flow.is_external` overrides the subtype: `true` adds the gross amount
+to net contribution as an external flow (for example a refund or reimbursement
+paid from outside the portfolio), and `false` keeps any credit internal, `BONUS`
+included.
 
 ---
 
@@ -413,13 +420,13 @@ The compiler expands these into canonical activity postings.
 
 ### Dividend Subtypes
 
-| Subtype             | Description                                                    | Expansion                   |
-| ------------------- | -------------------------------------------------------------- | --------------------------- |
-| `DRIP`              | Dividend Reinvestment Plan - dividend automatically reinvested | DIVIDEND + BUY              |
-| `QUALIFIED`         | Qualified dividend (tax classification)                        | DIVIDEND (pass-through)     |
-| `ORDINARY`          | Ordinary dividend (tax classification)                         | DIVIDEND (pass-through)     |
-| `RETURN_OF_CAPITAL` | Return of capital (reduces cost basis)                         | DIVIDEND (special handling) |
-| `DIVIDEND_IN_KIND`  | Dividend paid as additional units of the same asset            | DIVIDEND + BUY              |
+| Subtype             | Description                                                          | Expansion                   |
+| ------------------- | -------------------------------------------------------------------- | --------------------------- |
+| `DRIP`              | Dividend Reinvestment Plan - dividend automatically reinvested       | DIVIDEND + BUY              |
+| `QUALIFIED`         | Qualified dividend (tax classification)                              | DIVIDEND (pass-through)     |
+| `ORDINARY`          | Ordinary dividend (tax classification)                               | DIVIDEND (pass-through)     |
+| `RETURN_OF_CAPITAL` | Return of capital: capital paid back, not income; reduces cost basis | DIVIDEND (special handling) |
+| `DIVIDEND_IN_KIND`  | Dividend paid as additional units of the same asset                  | DIVIDEND + BUY              |
 
 #### DRIP Expansion
 
@@ -514,6 +521,61 @@ currency).
 
 ---
 
+### Return of Capital and Notional Distributions
+
+These activities track book cost and investment performance within an account,
+using its selected cost basis method. Enter the classification supplied by your
+broker or fund. They do not calculate country-specific taxes or establish that
+the selected method is valid for your tax return.
+
+A **return of capital** pays back part of your investment and reduces book cost.
+Any amount beyond the remaining basis is recorded as realized P&L. A **notional
+distribution** records income reinvested without additional units, increasing
+both income and book cost by the entered amount. It is sometimes called a
+phantom or reinvested distribution. This subtype is not a general basis
+correction and does not cover every non-cash tax event.
+
+For Canadian funds, T3 box 42 reports cost-base adjustments: positive amounts
+reduce ACB and negative amounts increase it. The table below shows how to record
+a ROC reclassification or a reinvested distribution matching those effects.
+
+| Record as                               | When                                                                    | Cash   | Cost basis               | Income           |
+| --------------------------------------- | ----------------------------------------------------------------------- | ------ | ------------------------ | ---------------- |
+| DIVIDEND with `RETURN_OF_CAPITAL`       | A distribution paid in cash that is capital                             | Booked | Down by the gross amount | None             |
+| ADJUSTMENT with `RETURN_OF_CAPITAL`     | Part of dividends already recorded turns out to be capital (box 42 > 0) | None   | Down by `amount`         | Down by `amount` |
+| ADJUSTMENT with `NOTIONAL_DISTRIBUTION` | A distribution reinvested without new units (box 42 < 0)                | None   | Up by `amount`           | Up by `amount`   |
+
+- The amount moves the cost basis your account's cost basis method keeps. With
+  weighted average cost, a return of capital reduces the pool, as a sale does,
+  so nothing is realized while the combined basis covers the amount, even when
+  transfer history keeps some lots separate. With FIFO, LIFO or HIFO, the amount
+  is spread over the lots by units, so every unit's cost moves alike. Each lot's
+  purchase price and fees stay as bought: what moves is its remaining cost
+  basis.
+- Beyond the remaining cost basis, a return of capital is realized P&L, shown as
+  a disposal with no units. One paid after you sold every unit is realized in
+  full, on the lot the sale closed, and its cash is booked.
+- In another currency, the cost basis in your account and base currency moves by
+  the amount at the day's rate, as the CRA converts the adjusted cost base when
+  a return of capital is received; the purchase keeps the rate it was bought at.
+- No units move, and net contribution does not change. A reclassification
+  changes the breakdown of income and gains without creating or removing
+  investment profit. A non-cash distribution creates no cash or contribution.
+- A return of capital on an asset the account has never held, or a notional
+  distribution on one it holds no units of, is rejected, and is left out of
+  performance and holdings income.
+- Rules: `docs/architecture/portfolio-engine-rules.md` R7.4.
+
+### Adjustment Subtypes
+
+| Subtype                 | Description                                                 | Effect                                          |
+| ----------------------- | ----------------------------------------------------------- | ----------------------------------------------- |
+| `OPTION_EXPIRY`         | Option contract expired worthless                           | Removes `quantity` lots, no cash                |
+| `RETURN_OF_CAPITAL`     | Dividends already recorded that were a return of capital    | Cost basis and income down by `amount`, no cash |
+| `NOTIONAL_DISTRIBUTION` | Taxable distribution reinvested without new units (phantom) | Cost basis and income up by `amount`, no cash   |
+
+---
+
 ## Metadata Structure
 
 Activities support a `metadata` JSON field for additional context:
@@ -533,12 +595,12 @@ Activities support a `metadata` JSON field for additional context:
 
 ### Key Metadata Fields
 
-| Field                  | Type    | Used By         | Description                                   |
-| ---------------------- | ------- | --------------- | --------------------------------------------- |
-| `flow.is_external`     | boolean | TRANSFER_IN/OUT | Marks transfer as crossing portfolio boundary |
-| `split_ratio`          | string  | SPLIT           | Human-readable split ratio (e.g., "2:1")      |
-| `source.broker`        | string  | All             | Original broker name                          |
-| `source.original_type` | string  | All             | Raw activity type from provider               |
+| Field                  | Type    | Used By                 | Description                                       |
+| ---------------------- | ------- | ----------------------- | ------------------------------------------------- |
+| `flow.is_external`     | boolean | TRANSFER_IN/OUT, CREDIT | Marks the flow as crossing the portfolio boundary |
+| `split_ratio`          | string  | SPLIT                   | Human-readable split ratio (e.g., "2:1")          |
+| `source.broker`        | string  | All                     | Original broker name                              |
+| `source.original_type` | string  | All                     | Raw activity type from provider                   |
 
 ---
 

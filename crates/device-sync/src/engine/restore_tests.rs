@@ -1,6 +1,5 @@
 use super::*;
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -22,10 +21,7 @@ struct FakeSnapshot {
 fn fake_snapshot(root_key: &str, id: &str, oplog_seq: i64) -> FakeSnapshot {
     let mut image = b"SQLite format 3\0".to_vec();
     image.extend_from_slice(id.as_bytes());
-    let dek = crate::crypto::derive_dek(root_key, 1).unwrap();
-    let blob = crate::crypto::encrypt(&dek, &BASE64_STANDARD.encode(image))
-        .unwrap()
-        .into_bytes();
+    let blob = crate::snapshot::encode(&image, root_key, 1).unwrap();
     FakeSnapshot {
         meta: SnapshotLatestResponse {
             snapshot_id: id.to_string(),
@@ -48,17 +44,21 @@ struct FakePorts {
     sync_state: StdMutex<SyncState>,
     snapshots: StdMutex<Vec<FakeSnapshot>>,
     latest: StdMutex<Option<String>>,
+    freshness_gate: Option<String>,
     download_gate: Option<Arc<Semaphore>>,
     backup_gate: Option<Arc<Semaphore>>,
     download_failures: AtomicUsize,
     snapshot_missing: AtomicBool,
     local_rows: AtomicI64,
+    remote_empty: AtomicBool,
+    empty_check_fails: AtomicBool,
     needs_bootstrap: AtomicBool,
     backup_fails: AtomicBool,
     replace_fails: AtomicBool,
     downloads: StdMutex<Vec<String>>,
     backups: AtomicUsize,
     replacements: StdMutex<Vec<(String, i64)>>,
+    restored_tables: StdMutex<Vec<String>>,
     portfolio_refreshes: AtomicUsize,
     resumed: AtomicUsize,
     resumed_after_restore: AtomicUsize,
@@ -81,17 +81,21 @@ impl FakePorts {
             sync_state: StdMutex::new(SyncState::Ready),
             snapshots: StdMutex::new(vec![snapshot]),
             latest: StdMutex::new(Some("snap-1".to_string())),
+            freshness_gate: None,
             download_gate: None,
             backup_gate: None,
             download_failures: AtomicUsize::new(0),
             snapshot_missing: AtomicBool::new(false),
             local_rows: AtomicI64::new(local_rows),
+            remote_empty: AtomicBool::new(false),
+            empty_check_fails: AtomicBool::new(false),
             needs_bootstrap: AtomicBool::new(true),
             backup_fails: AtomicBool::new(false),
             replace_fails: AtomicBool::new(false),
             downloads: StdMutex::new(Vec::new()),
             backups: AtomicUsize::new(0),
             replacements: StdMutex::new(Vec::new()),
+            restored_tables: StdMutex::new(Vec::new()),
             portfolio_refreshes: AtomicUsize::new(0),
             resumed: AtomicUsize::new(0),
             resumed_after_restore: AtomicUsize::new(0),
@@ -314,10 +318,17 @@ impl RestorePorts for FakePorts {
     }
 
     fn freshness_gate(&self, _device_id: &str) -> Option<String> {
-        None
+        self.freshness_gate.clone()
     }
 
     async fn clear_freshness_gate(&self, _device_id: &str) {}
+
+    async fn snapshot_is_empty(&self, _: Vec<u8>) -> Result<bool, String> {
+        if self.empty_check_fails.load(Ordering::SeqCst) {
+            return Err("scratch directory unavailable".to_string());
+        }
+        Ok(self.remote_empty.load(Ordering::SeqCst))
+    }
 
     fn local_rows(&self) -> Result<i64, String> {
         Ok(self.local_rows.load(Ordering::SeqCst))
@@ -353,6 +364,7 @@ impl RestorePorts for FakePorts {
         if self.replace_fails.load(Ordering::SeqCst) {
             return Err("foreign key violation".to_string());
         }
+        *self.restored_tables.lock().unwrap() = snapshot.tables.to_vec();
         let id = String::from_utf8_lossy(&image[16..]).to_string();
         self.replacements
             .lock()
@@ -994,4 +1006,90 @@ async fn finished_restore_is_not_restarted_by_a_transient_cycle_status() {
     ports.needs_bootstrap.store(true, Ordering::SeqCst);
     let next = start(&runtime, &ports, StartRestore::Recurring).await;
     assert_ne!(next.operation_id, ready.operation_id);
+}
+
+#[tokio::test]
+async fn pairing_waits_for_fresh_broker_data_even_when_the_cursor_is_unchanged() {
+    let mut ports = FakePorts::new(0);
+    ports.freshness_gate = Some(chrono::Utc::now().to_rfc3339());
+    ports.snapshots.lock().unwrap()[0].meta.created_at =
+        (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let ports = Arc::new(ports);
+    let runtime = runtime();
+    start(&runtime, &ports, StartRestore::Pairing).await;
+    wait_for_phase(&runtime, RestorePhase::WaitingForSnapshot).await;
+    assert!(ports.downloads().is_empty());
+    ports.add_snapshot("fresh-broker-data", 42);
+    wait_for_phase(&runtime, RestorePhase::Ready).await;
+    assert_eq!(ports.downloads(), vec!["fresh-broker-data"]);
+    assert_eq!(ports.replacements()[0].1, 42);
+}
+
+#[tokio::test]
+async fn pairing_setup_orders_preserve_destructive_consent_and_empty_source_warning() {
+    for (local_rows, remote_empty) in [(0, false), (12, true)] {
+        let runtime = Arc::new(DeviceSyncRuntimeState::new());
+        let ports = Arc::new(FakePorts::new(local_rows));
+        ports.remote_empty.store(remote_empty, Ordering::SeqCst);
+        runtime
+            .start_restore(ports.clone(), StartRestore::Pairing)
+            .await
+            .unwrap();
+        let operation = wait_for_phase(
+            &runtime,
+            if local_rows > 0 {
+                RestorePhase::AwaitingConsent
+            } else {
+                RestorePhase::Ready
+            },
+        )
+        .await;
+        assert_eq!(operation.snapshot.unwrap().is_empty, Some(remote_empty));
+        assert_eq!(
+            ports.replacements.lock().unwrap().len(),
+            usize::from(local_rows == 0)
+        );
+        if local_rows > 0 {
+            assert_eq!(
+                ports.backups.load(Ordering::SeqCst),
+                0,
+                "nothing happens before consent"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn restore_ignores_plaintext_table_list_when_selecting_local_tables() {
+    for tables in [
+        vec!["accounts".to_string()],
+        vec![],
+        vec!["invented".to_string()],
+    ] {
+        let ports = Arc::new(FakePorts::new(0));
+        ports.snapshots.lock().unwrap()[0].meta.covers_tables = tables;
+        let runtime = runtime();
+        start(&runtime, &ports, StartRestore::Pairing).await;
+        let ready = wait_for_phase(&runtime, RestorePhase::Ready).await;
+        assert!(ready.replaced);
+        assert_eq!(
+            *ports.restored_tables.lock().unwrap(),
+            wealthfolio_core::sync::APP_SYNC_TABLES
+                .iter()
+                .map(|table| table.to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[tokio::test]
+async fn optional_empty_snapshot_inspection_failure_still_requires_replacement_consent() {
+    let runtime = runtime();
+    let ports = Arc::new(FakePorts::new(12));
+    ports.empty_check_fails.store(true, Ordering::SeqCst);
+    start(&runtime, &ports, StartRestore::Pairing).await;
+    let operation = wait_for_phase(&runtime, RestorePhase::AwaitingConsent).await;
+    assert_eq!(operation.snapshot.unwrap().is_empty, None);
+    assert!(ports.replacements().is_empty());
+    assert_eq!(ports.backups.load(Ordering::SeqCst), 0);
 }

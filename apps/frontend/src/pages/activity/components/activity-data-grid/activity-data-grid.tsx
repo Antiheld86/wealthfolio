@@ -17,16 +17,20 @@ import { TransferMatchDialog } from "../transfer-match-dialog";
 import { isSameAccountCashFxConversion, nonCashTransferAssetKey } from "../transfer-link-utils";
 import { ActivityDeleteModal } from "../activity-delete-modal";
 import { useActivityMutations } from "../../hooks/use-activity-mutations";
+import { buildSameAccountFxDuplicate } from "../../utils/duplicate-fx-transfer";
 import { ActivityDataGridPagination } from "./activity-data-grid-pagination";
 import { ActivityDataGridToolbar } from "./activity-data-grid-toolbar";
 import {
   applyTransactionUpdate,
   createCurrencyResolver,
   createDraftTransaction,
+  isPairedInternalCashTransfer,
   partitionReviewRowsForApproval,
+  requiresTransferPairEditor,
   PINNED_COLUMNS,
   TRACKED_FIELDS,
   valuesAreEqual,
+  withNewPairPartners,
 } from "./activity-utils";
 import { isPendingReview, toLocalTransaction, type LocalTransaction } from "./types";
 import { useActivityColumns } from "./use-activity-columns";
@@ -160,9 +164,57 @@ export function ActivityDataGrid({
 
   // Row operations
   const handleDuplicate = useCallback(
-    (activity: ActivityDetails) => {
+    async (activity: ActivityDetails) => {
+      if (
+        activity.sourceGroupId &&
+        localTransactions.some(
+          (row) =>
+            row.sourceGroupId === activity.sourceGroupId &&
+            (dirtyTransactionIds.has(row.id) || pendingDeleteIds.has(row.id)),
+        )
+      ) {
+        toast({ title: t("activity:datagrid.save_edits_first"), variant: "destructive" });
+        return;
+      }
       const now = new Date();
       const source = toLocalTransaction(activity);
+      try {
+        const exchange = await buildSameAccountFxDuplicate(activity);
+        if (exchange) {
+          const duplicates = exchange.map(
+            (leg): LocalTransaction => ({
+              ...source,
+              id: generateTempActivityId(),
+              idempotencyKey: leg.idempotencyKey,
+              sourceGroupId: leg.sourceGroupId,
+              activityType: leg.activityType,
+              date: leg.activityDate,
+              createdAt: now,
+              updatedAt: now,
+              isNew: true,
+              status: ActivityStatus.POSTED,
+              needsReview: false,
+              amount: leg.amount ?? null,
+              currency: leg.currency,
+              fee: leg.fee ?? null,
+              tax: leg.tax,
+              fxRate: leg.fxRate,
+              comment: leg.comment ?? undefined,
+              assetId: "",
+              assetSymbol: "CASH",
+              isExternal: false,
+              metadata: { flow: { is_external: false } },
+              _amountEdited: true,
+            }),
+          );
+          setLocalTransactions((prev) => [...duplicates, ...prev]);
+          markDirtyBatch(duplicates.map((row) => row.id));
+          return;
+        }
+      } catch {
+        toast({ title: t("activity:datagrid.duplicate_transfer_failed"), variant: "destructive" });
+        return;
+      }
       const duplicated: LocalTransaction = {
         ...source,
         id: generateTempActivityId(),
@@ -170,13 +222,20 @@ export function ActivityDataGrid({
         createdAt: now,
         updatedAt: now,
         isNew: true,
-        comment: t("activity:datagrid.duplicated_comment"),
         idempotencyKey: generateId("manual-duplicate"),
+        sourceGroupId: undefined,
       };
       setLocalTransactions((prev) => [duplicated, ...prev]);
       markDirtyBatch([duplicated.id]);
     },
-    [markDirtyBatch, setLocalTransactions, t],
+    [
+      markDirtyBatch,
+      setLocalTransactions,
+      localTransactions,
+      dirtyTransactionIds,
+      pendingDeleteIds,
+      t,
+    ],
   );
 
   const [pendingDeleteActivity, setPendingDeleteActivity] = useState<ActivityDetails | null>(null);
@@ -302,6 +361,7 @@ export function ActivityDataGrid({
           result.quoteType,
           result.providerId,
           result.currency,
+          result.providerSymbol,
         ).then((resolved) => {
           if (requestId !== latestResolveRequestId.current) return;
           if (!resolved) return;
@@ -404,7 +464,21 @@ export function ActivityDataGrid({
   // Column definitions
   const columns = useActivityColumns({
     accounts,
-    onEditActivity,
+    onEditActivity: (activity) => {
+      if (
+        isPairedInternalCashTransfer(toLocalTransaction(activity)) &&
+        (dirtyTransactionIds.has(activity.id) ||
+          (activity.counterpartActivityId &&
+            dirtyTransactionIds.has(activity.counterpartActivityId)))
+      ) {
+        toast({
+          title: t("activity:datagrid.save_edits_first"),
+          description: t("activity:datagrid.edit_transfer_pair"),
+        });
+        return;
+      }
+      onEditActivity(activity);
+    },
     onDuplicate: handleDuplicate,
     onDelete: handleDelete,
     onLinkTransfer: handleRowLinkTransfer,
@@ -417,6 +491,18 @@ export function ActivityDataGrid({
   // Data change handler - processes changes from the data grid
   const onDataChange = useCallback(
     (nextData: LocalTransaction[]) => {
+      const previousById = new Map(localTransactions.map((row) => [row.id, row]));
+      if (
+        nextData.some((row) => {
+          const previous = previousById.get(row.id);
+          return previous && requiresTransferPairEditor(previous, row);
+        })
+      ) {
+        // This is also the paste/clear entry point. Reject the operation intact
+        // instead of applying amounts whose currency change was rejected.
+        toast({ description: t("activity:datagrid.edit_transfer_pair") });
+        return;
+      }
       setLocalTransactions((prev) => {
         const prevById = new Map(prev.map((t) => [t.id, t]));
         const changedIds: string[] = [];
@@ -464,9 +550,11 @@ export function ActivityDataGrid({
       accountLookup,
       assetCurrencyLookup,
       fallbackCurrency,
+      localTransactions,
       markDirtyBatch,
       resolveTransactionCurrency,
       setLocalTransactions,
+      t,
     ],
   );
 
@@ -495,9 +583,14 @@ export function ActivityDataGrid({
   const onRowsDelete = useCallback(
     (rowsToDelete: LocalTransaction[]) => {
       if (rowsToDelete.length === 0) return;
-      markForDeletionBatch(rowsToDelete.map((row) => ({ id: row.id, isNew: !!row.isNew })));
+      markForDeletionBatch(
+        withNewPairPartners(rowsToDelete, localTransactions).map((row) => ({
+          id: row.id,
+          isNew: !!row.isNew,
+        })),
+      );
     },
-    [markForDeletionBatch],
+    [markForDeletionBatch, localTransactions],
   );
 
   // Initialize data grid

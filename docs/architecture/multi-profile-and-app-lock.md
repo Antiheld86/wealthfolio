@@ -32,16 +32,31 @@ Different devices can use different local UUIDs for the same Connect user.
 
 ## Storage and legacy adoption
 
-Desktop development can set `WF_DATA_DIR` in the root `.env` to an absolute
-path. It takes precedence over `DATABASE_URL` for registry creation and legacy
+`pnpm tauri dev` uses the development application identity and ignores
+`DATABASE_URL` from `.env` or the shell, including on first launch. Remove this
+obsolete desktop development setting from older `.env` files and use
+`WF_DATA_DIR` to select a profile directory. This changes the pre-profile
+workflow of selecting an individual database through `.env`.
+
+Desktop development can set `WF_DATA_DIR` in the root `.env` to an absolute path
+for the profile registry and databases. When active, it also overrides legacy
 database discovery. New databases remain under `profiles/<id>/app.db`; an
-existing `app.db` in that directory is adopted using the usual migration rules.
-An empty/unset value keeps normal path resolution. Invalid or unwritable paths
-fail startup rather than falling back to production data. Release, packaged
-(`custom-protocol`), and mobile builds ignore `WF_DATA_DIR` and retain their
-normal Tauri app-data root and existing legacy database behavior. This does not
-move existing data or change OS keychain storage; use a fresh development folder
-rather than copying a production registry with its profile IDs and saved paths.
+existing `app.db` directly under `WF_DATA_DIR` is adopted on first profile
+initialization using the usual migration rules. An empty/unset value keeps
+normal path resolution. Invalid or unwritable paths fail startup rather than
+falling back to production data. Release, packaged (`custom-protocol`), and
+mobile builds ignore `WF_DATA_DIR` and retain their normal Tauri app-data root
+and existing legacy database behavior. This does not move existing data or
+change OS keychain storage; use a fresh development folder rather than copying a
+production registry with its profile IDs and saved paths.
+
+Packaged desktop apps do not ship with an `.env` file and normally use their
+app-data directory. For legacy compatibility, the production desktop identity
+still consults `DATABASE_URL` if manually supplied through the process
+environment or a runtime-discovered `.env`, provided `WF_DATA_DIR` is not
+active. It is used only to locate an existing database during first profile
+initialization. Once a registry exists, saved profile paths take precedence;
+changing `DATABASE_URL` does not switch databases.
 
 New profiles use this layout:
 
@@ -260,13 +275,29 @@ browser cookie. Tabs sharing an owner share lock/switch state. Other browsers
 remain independent. Profile lock does not log out instance authentication or
 stop server sync workers.
 
-The web shell closes its financial view when an active profile-state poll fails,
-including after a ten-second request timeout. This reuses the normal lock flow
-and clears cached financial queries. If the backend cannot be reached, the view
-stays closed and Retry completes backend locking after reconnection. Lock
-requests also time out after ten seconds so Retry remains available. This
-connectivity rule applies to all open web profiles; backend idle expiry remains
-independent of browser polling.
+An already-open profile stays visible when profile-state verification fails,
+including after a ten-second request timeout. The shell retains the session
+identity and rechecks on reconnect, stream errors, visibility changes, or
+explicit Retry during startup. Going offline does not trigger a state read, and
+stream errors are reconciled only while the browser reports online. A confirmed
+expired or revoked grant closes the view; a connection error alone does not.
+Cached content can remain visible while disconnected after a server-side expiry,
+until verification succeeds. A failed check never requests a backend lock.
+Explicit lock and switch requests still revoke locally immediately and have a
+ten-second deadline so Retry remains available when the server is unreachable.
+
+User interaction updates the backend idle deadline at most once every thirty
+seconds for password-protected profiles, on both web and Tauri. Unprotected
+profiles send no activity updates. Background requests do not count as activity.
+Transport errors do not revoke the local grant or trigger additional state
+reads; explicit locked/stale responses revoke it. Backend expiry remains
+authoritative and late activity cannot revive an expired grant.
+
+Instance authentication is checked at startup and keeps financial content hidden
+when authentication cannot be verified. Explicit Retry reloads the page.
+Confirmed authentication rejection returns to sign-in without starting another
+check. Startup verification failures and proxy sign-in pages offer the same
+manual reload recovery.
 
 Middleware validates the browser owner and `x-wf-profile-scope`, then injects
 the fixed runtime into request extensions. SSE uses the cookie plus a non-secret

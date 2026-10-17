@@ -13,7 +13,6 @@ use std::sync::{Arc, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
@@ -91,6 +90,8 @@ pub struct RestoreSnapshotRef {
     pub snapshot_id: String,
     pub oplog_seq: i64,
     pub created_at: String,
+    #[serde(default)]
+    pub is_empty: Option<bool>,
 }
 
 /// Authoritative state of the profile's restore operation.
@@ -153,6 +154,7 @@ pub trait RestorePorts: CredentialStore + SyncTransport + Send + Sync + 'static 
     async fn clear_freshness_gate(&self, device_id: &str);
     /// Rows in the synced tables that a replacement would overwrite.
     fn local_rows(&self) -> Result<i64, String>;
+    async fn snapshot_is_empty(&self, image: Vec<u8>) -> Result<bool, String>;
     /// Record that no snapshot is required for this device.
     async fn mark_restore_not_needed(
         &self,
@@ -202,6 +204,7 @@ struct RestoreEntry {
 /// A downloaded and validated snapshot, still encrypted. It stays in memory
 /// while the user decides; a readable copy exists only during replacement.
 struct PreparedSnapshot {
+    is_empty: Option<bool>,
     ciphertext: Vec<u8>,
     tables: Vec<String>,
     oplog_seq: i64,
@@ -576,6 +579,9 @@ impl DeviceSyncRuntimeState {
 
         let prepared = download_snapshot(ports, &session, &selected).await?;
         self.with_entry(operation_id, |entry| {
+            if let Some(snapshot) = &mut entry.operation.snapshot {
+                snapshot.is_empty = prepared.is_empty;
+            }
             entry.prepared = Some(Arc::new(prepared));
         })
         .ok_or(StepError::Stale)?;
@@ -599,6 +605,7 @@ impl DeviceSyncRuntimeState {
                         snapshot_id: snapshot.snapshot_id.clone(),
                         oplog_seq: snapshot.oplog_seq,
                         created_at: snapshot.created_at.clone(),
+                        is_empty: None,
                     };
                     info!(
                         "[DeviceSync] Restore {} selected snapshot {} (oplog_seq={})",
@@ -1072,7 +1079,12 @@ async fn satisfies_freshness_gate<P: RestorePorts>(
     if created_at + chrono::Duration::seconds(SNAPSHOT_FRESHNESS_CLOCK_SKEW_LEEWAY_SECS) > gate {
         return Ok(true);
     }
-    // An older snapshot is still usable when it already covers every event.
+    // Schema 4 also contains broker data which never enters the event stream.
+    // Event coverage cannot make a pre-pairing snapshot fresh for that data.
+    if latest.schema_version >= 4 {
+        return Ok(false);
+    }
+    // Legacy senders reuse snapshots when they cover every event.
     Ok(matches!(
         ports.get_events_cursor(&session.token, &session.device_id).await,
         Ok(cursor) if latest.oplog_seq >= cursor.cursor
@@ -1112,28 +1124,30 @@ async fn download_snapshot<P: RestorePorts>(
         return Err(schema_newer(headers.schema_version));
     }
 
-    // Validate before asking for consent; the readable image is discarded.
-    decode_snapshot_image(&blob, &session.identity).map_err(|message| {
+    // Inspect a validated private image before asking for replacement consent.
+    let image = decode_snapshot_image(&blob, &session.identity).map_err(|message| {
         failure(
             RestoreErrorCode::SnapshotInvalid,
             RestoreRetry::NewAttempt,
             message,
         )
     })?;
+    let is_empty = match ports.snapshot_is_empty(image).await {
+        Ok(value) => Some(value),
+        Err(_) => {
+            warn!("[DeviceSync] Optional snapshot emptiness inspection unavailable");
+            None
+        }
+    };
 
-    let mut tables: Vec<String> = selected
-        .covers_tables
+    // Plaintext cloud metadata cannot narrow the authenticated snapshot's restore.
+    // Storage checks each locally known table in the decrypted image and skips absent tables.
+    let tables = APP_SYNC_TABLES
         .iter()
-        .filter(|table| APP_SYNC_TABLES.contains(&table.as_str()))
-        .cloned()
+        .map(|table| table.to_string())
         .collect();
-    if tables.is_empty() {
-        tables = APP_SYNC_TABLES
-            .iter()
-            .map(|table| table.to_string())
-            .collect();
-    }
     Ok(PreparedSnapshot {
+        is_empty,
         ciphertext: blob,
         tables,
         oplog_seq: selected.oplog_seq,
@@ -1181,17 +1195,5 @@ fn decode_snapshot_image(blob: &[u8], identity: &SyncIdentity) -> Result<Vec<u8>
         .key_version
         .filter(|version| *version > 0)
         .ok_or("Invalid key version in sync identity")?;
-    let ciphertext = std::str::from_utf8(blob)
-        .map_err(|_| "Snapshot payload is not valid UTF-8 (expected encrypted ciphertext)")?;
-    let dek = crate::crypto::derive_dek(root_key, key_version as u32)
-        .map_err(|e| format!("Failed to derive snapshot DEK: {e}"))?;
-    let decrypted = crate::crypto::decrypt(&dek, ciphertext.trim())
-        .map_err(|e| format!("Failed to decrypt snapshot payload: {e}"))?;
-    let image = BASE64_STANDARD
-        .decode(decrypted.trim())
-        .map_err(|e| format!("Failed to base64-decode decrypted snapshot: {e}"))?;
-    if !image.starts_with(b"SQLite format 3\0") {
-        return Err("Decrypted snapshot is not a valid SQLite image".to_string());
-    }
-    Ok(image)
+    crate::snapshot::decode(blob, root_key, key_version)
 }

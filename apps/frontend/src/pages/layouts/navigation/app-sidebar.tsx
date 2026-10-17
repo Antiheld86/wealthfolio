@@ -147,10 +147,10 @@ export function AppSidebar({ navigation }: AppSidebarProps) {
             </div>
 
             <div className="flex shrink-0 flex-col p-2">
+              <ConnectNavItem collapsed={collapsed} />
               {navigation?.secondary?.map((item) => (
                 <NavItem key={item.title} item={item} collapsed={collapsed} />
               ))}
-              <ConnectNavItem collapsed={collapsed} />
               {isWeb && requiresAuth && (
                 <Button
                   type="button"
@@ -225,7 +225,7 @@ function PinnedAddonNavItem({ item, collapsed, onSetPinned }: PinnedAddonNavItem
 
   return (
     <div className="group relative">
-      <NavItem item={item} collapsed={collapsed} className="pr-10" />
+      <NavItem item={item} collapsed={collapsed} className="w-full pr-10" />
 
       <DropdownMenu>
         <DropdownMenuTrigger asChild>

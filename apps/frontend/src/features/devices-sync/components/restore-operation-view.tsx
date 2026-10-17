@@ -98,9 +98,11 @@ export function RestoreOperationView({
           title: profileName
             ? t("sync:restore.consent.titleNamed", { profile: profileName })
             : t("sync:restore.consent.title"),
-          description: copiedAtLabel
-            ? t("sync:restore.consent.descriptionDated", { date: copiedAtLabel })
-            : t("sync:restore.consent.description"),
+          description: operation.snapshot?.isEmpty
+            ? t("sync:restore.consent.descriptionEmpty")
+            : copiedAtLabel
+              ? t("sync:restore.consent.descriptionDated", { date: copiedAtLabel })
+              : t("sync:restore.consent.description"),
         };
       case "backing_up":
         return {
@@ -220,7 +222,7 @@ export function RestoreOperationView({
         phase === "transferring" ? (
           <DeviceLink source="other" flowing />
         ) : phase === "waiting_for_snapshot" ? (
-          <DeviceLink source="other" />
+          <DeviceLink source="other" flowing />
         ) : undefined
       }
       actions={actions}

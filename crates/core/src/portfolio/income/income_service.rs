@@ -53,7 +53,12 @@ impl IncomeService {
     }
 
     fn today_in_user_timezone(&self) -> NaiveDate {
-        let tz = parse_user_timezone_or_default(&self.timezone.read().unwrap());
+        let tz = parse_user_timezone_or_default(
+            &self
+                .timezone
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
         user_today(tz)
     }
 
@@ -86,7 +91,11 @@ impl IncomeServiceTrait for IncomeService {
             return Ok(Vec::new());
         }
 
-        let base_currency = self.base_currency.read().unwrap().clone();
+        let base_currency = self
+            .base_currency
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         let current_date = self.today_in_user_timezone();
         let current_year = current_date.year();
         let last_year = current_year - 1;
@@ -150,11 +159,13 @@ impl IncomeServiceTrait for IncomeService {
                 &activity.currency,
                 &base_currency,
             ) {
-                Ok(amount) => amount,
+                Ok(amount) => Some(amount),
                 Err(e) => {
+                    // Counting the amount as if it were already in the base
+                    // currency would misstate every total, so it is left out
+                    // and the summary names its currency instead.
                     error!("Error converting currency: {:?}", e);
-                    // Consider if returning the original amount is the correct fallback
-                    activity.amount
+                    None
                 }
             };
 
@@ -172,14 +183,18 @@ impl IncomeServiceTrait for IncomeService {
                 account_name: activity.account_name.clone(),
             };
 
-            total_summary.add_income(&activity_copy, converted_amount);
+            let add = |summary: &mut IncomeSummary| match converted_amount {
+                Some(amount) => summary.add_income(&activity_copy, amount),
+                None => summary.add_unconverted_income(&activity_copy),
+            };
+            add(&mut total_summary);
 
             if date.year() == current_year {
-                ytd_summary.add_income(&activity_copy, converted_amount);
+                add(&mut ytd_summary);
             } else if date.year() == last_year {
-                last_year_summary.add_income(&activity_copy, converted_amount);
+                add(&mut last_year_summary);
             } else if date.year() == two_years_ago {
-                two_years_ago_summary.add_income(&activity_copy, converted_amount);
+                add(&mut two_years_ago_summary);
             }
         }
 
@@ -203,6 +218,15 @@ impl IncomeServiceTrait for IncomeService {
 
         // Two years ago YoY growth can't be calculated without activity from three years ago
         two_years_ago_summary.yoy_growth = None;
+
+        // YoY growth and the page's previous-period comparison read the
+        // previous period's totals, so its left-out currencies apply too.
+        ytd_summary
+            .unconverted_currencies
+            .extend(last_year_summary.unconverted_currencies.iter().cloned());
+        last_year_summary
+            .unconverted_currencies
+            .extend(two_years_ago_summary.unconverted_currencies.iter().cloned());
 
         // Round the calculated values before returning
         let summaries = vec![

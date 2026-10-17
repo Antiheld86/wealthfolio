@@ -11,6 +11,7 @@ use crate::context::ServiceContext;
 use crate::profiles::{ConnectAccess, NativeProfiles, ProfileAccess};
 use log::{debug, error};
 use serde::Serialize;
+#[cfg(feature = "device-sync")]
 use std::future::Future;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
@@ -114,6 +115,7 @@ pub async fn store_sync_session(
         })
         .await?;
 
+    state.backup_scheduler.wake();
     Ok(())
 }
 
@@ -124,7 +126,7 @@ pub async fn post_login_bootstrap(
 ) -> Result<PostLoginBootstrapResult, String> {
     let context = state.context()?;
     let cloned_context = context.clone();
-    let broker_sync = run_post_login_broker_bootstrap(app, Arc::clone(&cloned_context)).await;
+    let broker_sync = run_broker_bootstrap(app, Arc::clone(&cloned_context)).await;
     let device_sync = run_post_login_device_bootstrap(cloned_context).await;
 
     Ok(PostLoginBootstrapResult {
@@ -134,7 +136,7 @@ pub async fn post_login_bootstrap(
 }
 
 #[cfg(feature = "connect-sync")]
-async fn run_post_login_broker_bootstrap(
+pub(crate) async fn run_broker_bootstrap(
     app: AppHandle,
     context: Arc<ServiceContext>,
 ) -> PostLoginBootstrapSyncResult {
@@ -172,10 +174,10 @@ async fn run_post_login_broker_bootstrap(
     tauri::async_runtime::spawn(async move {
         match perform_broker_sync_with_guard(&context, Some(&app_handle), guard).await {
             Ok(_result) => {
-                debug!("[Connect] Post-login broker sync completed successfully");
+                debug!("[Connect] Broker bootstrap sync completed successfully");
             }
             Err(err) => {
-                error!("[Connect] Post-login broker sync failed: {}", err);
+                error!("[Connect] Broker bootstrap sync failed: {}", err);
             }
         }
     });
@@ -184,7 +186,7 @@ async fn run_post_login_broker_bootstrap(
 }
 
 #[cfg(not(feature = "connect-sync"))]
-async fn run_post_login_broker_bootstrap(
+pub(crate) async fn run_broker_bootstrap(
     _app: AppHandle,
     _context: Arc<ServiceContext>,
 ) -> PostLoginBootstrapSyncResult {
@@ -266,8 +268,10 @@ pub struct SyncSessionStatus {
     pub is_configured: bool,
 }
 
+// Async so the keyring read runs off the UI thread: a slow or locked keyring
+// would otherwise freeze the window.
 #[tauri::command]
-pub fn get_sync_session_status(state: ConnectAccess) -> Result<SyncSessionStatus, String> {
+pub async fn get_sync_session_status(state: ConnectAccess) -> Result<SyncSessionStatus, String> {
     let context = state.context()?;
     Ok(SyncSessionStatus {
         is_configured: context.connect_service().is_session_configured()?,
@@ -276,6 +280,7 @@ pub fn get_sync_session_status(state: ConnectAccess) -> Result<SyncSessionStatus
 
 /// Clear explicit logout credentials and stop the worker in one transition.
 async fn disconnect_cloud_session(context: &ServiceContext) -> Result<(), String> {
+    context.backup_scheduler.wake();
     context
         .connect_service()
         .clear_session_with(|| async {
@@ -294,7 +299,9 @@ async fn disconnect_cloud_session(context: &ServiceContext) -> Result<(), String
                 .await;
         })
         .await
-        .map(|_| ())
+        .map(|_| {
+            context.backup_scheduler.wake();
+        })
 }
 
 #[derive(Serialize)]

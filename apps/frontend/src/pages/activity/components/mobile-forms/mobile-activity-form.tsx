@@ -1,3 +1,4 @@
+import { getTransferRate } from "../../hooks/use-internal-transfer-currencies";
 import { logger } from "@/adapters";
 import { buildAssetResolutionInput } from "@/lib/asset-resolution-input";
 import { Button } from "@wealthfolio/ui/components/ui/button";
@@ -25,6 +26,7 @@ import {
 } from "@/lib/activity-utils";
 import { buildOccSymbol, isValidOptionExpiration, parseOccSymbol } from "@/lib/occ-symbol";
 import { generateId } from "@/lib/id";
+import { normalizeCurrency } from "@/lib/utils";
 import type { ActivityCreate, ActivityDetails, ActivityUpdate } from "@/lib/types";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -53,6 +55,7 @@ interface MobileActivityFormProps {
 
 export interface TransferValidationInput {
   activityType: string;
+  accountId?: string;
   transferMode?: string;
   isExternal?: boolean;
   direction?: string;
@@ -187,6 +190,40 @@ export function validateTransferFields(
         "Please select a destination account.",
       ),
     };
+  }
+
+  if (isCash && !isExternal) {
+    for (const field of ["sourceCurrency", "destinationCurrency"] as const) {
+      if (!input[field]?.trim())
+        return {
+          field,
+          message: tr("activity:form.err_currency_required", "Currency is required."),
+        };
+    }
+  }
+
+  if (!isExternal && input.accountId && input.accountId === input.toAccountId) {
+    if (!isCash) {
+      return {
+        field: "toAccountId",
+        message: tr(
+          "activity:form.err_accounts_different",
+          "Source and destination accounts must be different.",
+        ),
+      };
+    }
+    if (
+      normalizeCurrency(input.sourceCurrency ?? undefined) ===
+      normalizeCurrency(input.destinationCurrency ?? undefined)
+    ) {
+      return {
+        field: "destinationCurrency",
+        message: tr(
+          "activity:form.err_same_account_currencies",
+          "Choose different currencies for a same-account transfer.",
+        ),
+      };
+    }
   }
 
   return null;
@@ -345,8 +382,9 @@ export function MobileActivityForm({
         : activity?.amount
           ? Number(activity.amount)
           : undefined;
-    const pairFxRate = activity?.fxRate ?? activity?.counterpartFxRate;
-    const fxRate = pairFxRate ? Number(pairFxRate) : undefined;
+    const valuationRate =
+      activity?.fxRate ?? (isSecurityTransferActivity ? activity?.counterpartFxRate : undefined);
+    const fxRate = valuationRate ? Number(valuationRate) : undefined;
 
     // Detect option/bond activities for editing
     const isOptionActivity = activity?.instrumentType === "OPTION";
@@ -365,6 +403,7 @@ export function MobileActivityForm({
       amount: activity?.amount != null ? Number(activity.amount) : undefined,
       sourceAmount,
       destinationAmount,
+      transferRate: getTransferRate(sourceAmount, destinationAmount),
       sourceCurrency: editingTransferIn
         ? (activity?.counterpartCurrency ?? activity?.currency)
         : activity?.currency,
@@ -488,6 +527,7 @@ export function MobileActivityForm({
         isExternal: _isExternal,
         direction: _direction,
         toAccountId: _toAccountId,
+        transferRate: _transferRate,
         // Strip option-internal fields (not sent to backend)
         assetType: _assetType,
         underlyingSymbol: _underlying,
@@ -551,6 +591,7 @@ export function MobileActivityForm({
       const transferError = validateTransferFields(
         {
           activityType: submitData.activityType,
+          accountId: submitData.accountId,
           transferMode: _tm,
           isExternal: _isExternal,
           direction: _direction,
@@ -587,7 +628,7 @@ export function MobileActivityForm({
             sourceCurrency === destinationCurrency
               ? sourceAmount
               : (submitData.destinationAmount ??
-                (sourceAmount && submitData.fxRate ? sourceAmount * submitData.fxRate : undefined));
+                (sourceAmount && _transferRate ? sourceAmount * _transferRate : undefined));
 
           if (!sourceAmount || !destinationAmount || !sourceCurrency || !destinationCurrency) {
             throw new Error(t("activity:mobile_form.err_transfer_amount_currencies"));
@@ -618,8 +659,6 @@ export function MobileActivityForm({
             destinationAmount,
             sourceCurrency,
             destinationCurrency,
-            fxRate:
-              sourceCurrency === destinationCurrency ? undefined : (submitData.fxRate ?? null),
             notes: submitData.comment ?? null,
             transferMode: "cash",
           });
@@ -889,7 +928,7 @@ export function MobileActivityForm({
             const sourceCurrency = form.getValues("sourceCurrency" as any);
             const destinationCurrency = form.getValues("destinationCurrency" as any);
             return sourceCurrency && destinationCurrency && sourceCurrency !== destinationCurrency
-              ? [...baseFields, "toAccountId", "sourceAmount", "destinationAmount", "fxRate"]
+              ? [...baseFields, "toAccountId", "sourceAmount", "destinationAmount", "transferRate"]
               : [...baseFields, "toAccountId", "sourceAmount"];
           }
           return [...baseFields, "amount", "fee"];

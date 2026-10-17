@@ -71,7 +71,11 @@ describe("RestoreOperationView", () => {
   it("cancels while transferring and offers no approval", () => {
     const restore = renderView(op({ phase: "waiting_for_snapshot" }));
 
-    expect(screen.getByText("Waiting for your other device")).toBeInTheDocument();
+    expect(screen.getByText("Waiting for an up-to-date copy")).toBeInTheDocument();
+    expect(
+      screen.getByText(/An up-to-date encrypted copy is not available yet/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/still uploading/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Replace data" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Cancel setup" }));
     expect(restore.cancel.mutateAsync).toHaveBeenCalledWith("op-1");
@@ -120,6 +124,23 @@ describe("RestoreOperationView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Back up and replace" }));
     expect(restore.approve.mutateAsync).toHaveBeenCalledWith({ operationId: "op-1", backup: true });
+  });
+
+  it("warns explicitly before replacing an existing portfolio with an empty one", () => {
+    const restore = renderView(
+      op({
+        phase: "awaiting_consent",
+        snapshot: {
+          snapshotId: "empty",
+          oplogSeq: 0,
+          createdAt: "2026-09-22T11:31:00Z",
+          isEmpty: true,
+        },
+      }),
+    );
+    expect(screen.getByText(/Your other device has an empty portfolio/)).toBeInTheDocument();
+    expect(restore.approve.mutateAsync).not.toHaveBeenCalled();
+    expect(screen.getByRole("checkbox", { name: "Back up this profile first" })).toBeChecked();
   });
 
   // Working steps list their real sub-steps, following the restore's phase.
