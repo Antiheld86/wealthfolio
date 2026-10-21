@@ -20,7 +20,6 @@ import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-  useNumberFormatting,
 } from "@wealthfolio/ui";
 import { AnimatedToggleGroup } from "@wealthfolio/ui/components/ui/animated-toggle-group";
 import { Checkbox } from "@wealthfolio/ui/components/ui/checkbox";
@@ -100,16 +99,18 @@ function FmvPerUnitLabel() {
         {t("activity:form.label_fmv_per_unit")}
       </FormLabel>
       <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            className="text-muted-foreground/70 hover:text-foreground inline-flex rounded-full transition-colors"
-            aria-label={t("activity:form.more_info_about", {
-              label: t("activity:form.label_fmv_per_unit"),
-            })}
-          >
-            <Icons.Info className="h-3.5 w-3.5" />
-          </button>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              className="text-muted-foreground/70 hover:text-foreground inline-flex rounded-full transition-colors"
+              aria-label={t("activity:form.more_info_about", {
+                label: t("activity:form.label_fmv_per_unit"),
+              })}
+            />
+          }
+        >
+          <Icons.Info className="h-3.5 w-3.5" />
         </TooltipTrigger>
         <TooltipContent className="max-w-xs text-xs">
           {t("activity:form.help_fmv_per_unit")}
@@ -126,7 +127,6 @@ export function MobileDetailsStep({
   amountWasEdited,
 }: MobileDetailsStepProps) {
   const { t } = useTranslation();
-  const formatting = useNumberFormatting();
   const form = useFormContext<NewActivityFormValues>();
   const { control, getFieldState, getValues, watch, setValue, register } = form;
   const { settings } = useSettingsContext();
@@ -716,7 +716,7 @@ export function MobileDetailsStep({
                       <span className={!field.value ? "text-muted-foreground" : ""}>
                         {displayAccountText}
                       </span>
-                      <Icons.ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                      <Icons.ChevronDown className="ms-2 h-4 w-4 shrink-0 opacity-50" />
                     </Button>
                   </FormControl>
                   <FormMessage />
@@ -751,7 +751,7 @@ export function MobileDetailsStep({
                           <span className={!field.value ? "text-muted-foreground" : ""}>
                             {toDisplayText}
                           </span>
-                          <Icons.ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                          <Icons.ChevronDown className="ms-2 h-4 w-4 shrink-0 opacity-50" />
                         </Button>
                       </FormControl>
                       <FormMessage />
@@ -923,12 +923,7 @@ export function MobileDetailsStep({
                       </p>
                     </div>
                     <span className="text-lg font-semibold tabular-nums">
-                      {formatting.formatDecimal(calculatedTradeAmount ?? 0, {
-                        style: currency ? "currency" : "decimal",
-                        currency: currency || undefined,
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2,
-                      })}
+                      {formatAmount(calculatedTradeAmount ?? 0, currency ?? "", Boolean(currency))}
                     </span>
                   </div>
                 </div>
@@ -1061,7 +1056,7 @@ export function MobileDetailsStep({
                         <FormItem>
                           <FormLabel className="text-base font-medium">
                             {t("activity:form.label_transfer_rate")}
-                            <span className="text-muted-foreground ml-2 text-xs font-normal">
+                            <span className="text-muted-foreground ms-2 text-xs font-normal">
                               1 {effectiveSourceCurrency} ={" "}
                               {Number(field.value) > 0 ? field.value : "?"}{" "}
                               {effectiveDestinationCurrency}
@@ -1168,7 +1163,7 @@ export function MobileDetailsStep({
                   <FormControl>
                     <Textarea
                       placeholder={t("activity:mobile_description_placeholder")}
-                      className="min-h-[100px] resize-none text-base sm:text-sm"
+                      className="min-h-25 resize-none text-base sm:text-sm"
                       {...field}
                       value={field.value ?? ""}
                     />
@@ -1234,7 +1229,7 @@ function MobileAccountSheet({ accounts, open, onOpenChange, onSelect }: MobileAc
               <button
                 key={account.value}
                 onClick={() => handleAccountSelect(account)}
-                className="card-mobile hover:bg-accent active:bg-accent/80 focus:border-primary flex w-full items-center gap-3 border border-transparent text-left transition-colors focus:outline-none"
+                className="card-mobile hover:bg-accent active:bg-accent/80 focus:border-primary flex w-full items-center gap-3 border border-transparent text-start transition-colors focus:outline-none"
               >
                 <div className="bg-primary/10 flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-full">
                   <Icons.Briefcase className="text-primary h-5 w-5" />
@@ -1243,7 +1238,7 @@ function MobileAccountSheet({ accounts, open, onOpenChange, onSelect }: MobileAc
                   <div className="text-foreground truncate font-medium">{account.label}</div>
                   <div className="text-muted-foreground mt-0.5 text-sm">{account.currency}</div>
                 </div>
-                <Icons.ChevronRight className="text-muted-foreground h-5 w-5 flex-shrink-0" />
+                <Icons.ChevronRight className="text-muted-foreground h-5 w-5 flex-shrink-0 rtl:rotate-180" />
               </button>
             ))}
           </div>
