@@ -4,6 +4,19 @@ use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_dialog::DialogExt;
 
+pub fn set_menu_visibility<R: Runtime>(
+    app: &AppHandle<R>,
+    menu_bar_visible: bool,
+) -> Result<(), tauri::Error> {
+    // macOS needs its menu for standard editing and application shortcuts.
+    if menu_bar_visible || cfg!(target_os = "macos") {
+        app.set_menu(create_menu(app)?)?;
+    } else {
+        app.remove_menu()?;
+    }
+    Ok(())
+}
+
 pub fn create_menu<R: Runtime>(app: &AppHandle<R>) -> Result<Menu<R>, tauri::Error> {
     let app_menu = SubmenuBuilder::new(app, "Wealthfolio")
         .item(&MenuItemBuilder::with_id("open_settings", "Settings...").build(app)?)
@@ -146,7 +159,10 @@ pub fn handle_menu_event(app: &AppHandle, event_id: &str) {
                         // Error - show native dialog
                         app_handle
                             .dialog()
-                            .message(format!("Failed to check for updates: {}", e))
+                            .message(native_dialog_text(&format!(
+                                "Failed to check for updates: {}",
+                                e
+                            )))
                             .title("Update Check Failed")
                             .show(|_| {});
                     }
@@ -164,5 +180,32 @@ pub fn handle_menu_event(app: &AppHandle, event_id: &str) {
                 .show(|_| {});
         }
         _ => {}
+    }
+}
+
+/// rfd's GTK backend passes dialog text to GTK as a printf format string
+/// (PolyMeilex/rfd#343), so a literal `%` (in an error message, say) must be
+/// doubled there. Remove this once tauri-plugin-dialog uses an rfd with
+/// that fixed, or the doubled `%%` will show.
+fn native_dialog_text(text: &str) -> String {
+    if cfg!(target_os = "linux") {
+        text.replace('%', "%%")
+    } else {
+        text.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_dialog_text_keeps_percent_signs_literal() {
+        let expected = if cfg!(target_os = "linux") {
+            "Run %%s or 100%% with apt."
+        } else {
+            "Run %s or 100% with apt."
+        };
+        assert_eq!(native_dialog_text("Run %s or 100% with apt."), expected);
     }
 }

@@ -5,6 +5,7 @@ import * as React from "react";
 import { useTranslation } from "react-i18next";
 
 import { cn } from "../../lib/utils";
+import { usePortalScopeProps } from "./portal-scope";
 import { Icons } from "./icons";
 import { Sheet, SheetContent } from "./sheet";
 
@@ -81,7 +82,8 @@ function DialogTrigger(props: DialogPrimitive.Trigger.Props) {
 }
 
 function DialogPortal(props: DialogPrimitive.Portal.Props) {
-  return <DialogPrimitive.Portal data-slot="dialog-portal" {...props} />;
+  const scopeProps = usePortalScopeProps();
+  return <DialogPrimitive.Portal data-slot="dialog-portal" {...scopeProps} {...props} />;
 }
 
 function DialogClose(props: DialogPrimitive.Close.Props) {
@@ -155,7 +157,7 @@ function DialogContent({
       <DialogPrimitive.Popup
         data-slot="dialog-content"
         className={cn(
-          "bg-card text-card-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border p-6 shadow-lg outline-none duration-100 [&>*]:min-w-0",
+          "bg-card text-card-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 rounded-(--dialog-radius) border-(color:--overlay-border) shadow-(--overlay-shadow) fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border p-6 outline-none duration-100 [&>*]:min-w-0",
           className,
         )}
         {...props}
@@ -164,7 +166,7 @@ function DialogContent({
         {showCloseButton && (
           <DialogPrimitive.Close
             data-slot="dialog-close"
-            className="focus-visible:outline-solid focus-visible:outline-ring rounded-xs absolute end-4 top-4 opacity-70 transition-opacity hover:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 disabled:pointer-events-none [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0"
+            className="focus-visible:outline-ring absolute end-4 top-4 rounded-xs opacity-70 transition-opacity hover:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-solid disabled:pointer-events-none [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
           >
             <Icons.X />
             <span className="sr-only">{t("ui:dialog.close", "Close")}</span>

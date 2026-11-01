@@ -7,17 +7,18 @@ import {
   isAssetBackedIncomeActivity,
   isCashActivity,
   isCashTransfer,
+  isConversionRow,
   isFeeActivity,
   isIncomeActivity,
   isSecuritiesTransfer,
   isSplitActivity,
-  localizeActivityTypeName,
+  localizeActivityRowLabel,
 } from "@/lib/activity-utils";
 import { ActivityType } from "@/lib/constants";
 import { formatOptionSubtitle, parseOccSymbol } from "@/lib/occ-symbol";
 import { useSettingsContext } from "@/lib/settings-provider";
 import { ActivityDetails } from "@/lib/types";
-import { formatDateTime } from "@/lib/utils";
+import { formatDateTime, cn } from "@/lib/utils";
 import {
   AmountDisplay,
   Button,
@@ -38,14 +39,23 @@ import { Card } from "@wealthfolio/ui/components/ui/card";
 import { Link } from "react-router-dom";
 import { connectPagePath } from "@/features/wealthfolio-connect/lib/connect-url";
 import { useTranslation } from "react-i18next";
-import { observeElementOffset, useVirtualizer } from "@tanstack/react-virtual";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { InfiniteScrollTrigger } from "@/components/infinite-scroll-trigger";
 import { useBalancePrivacy } from "@/hooks/use-balance-privacy";
-import { useVirtualScrollContainer } from "@/hooks/use-virtual-scroll-container";
+import {
+  observeCurrentScrollOffset,
+  useVirtualScrollContainer,
+} from "@/hooks/use-virtual-scroll-container";
 import { ActivityOperations } from "../activity-operations";
 import { ActivityTypeBadge } from "../activity-type-badge";
-import { flattenActivityDayGroups, groupActivitiesByDay } from "./activity-day-groups";
+import { flattenDayGroups } from "@/lib/day-groups";
+import { groupActivitiesByDay } from "./activity-day-groups";
 import { ActivityDayHeading } from "./activity-day-header";
+import {
+  NEEDS_REVIEW_CARD_CLASS,
+  NeedsReviewMark,
+  NeedsReviewStripe,
+} from "@/components/needs-review";
 
 /**
  * Starting heights for virtualized cards. The detailed card grows with the
@@ -127,7 +137,7 @@ export const ActivityTableMobile = ({
       (activity) => activity,
       (activity) => formatDateTime(activity.date, dateFormatting, appTimezone).date,
     );
-    return flattenActivityDayGroups(groups, (activity) => activity.id);
+    return flattenDayGroups(groups, (activity) => activity.id);
   }, [activities, appTimezone, dateFormatting, groupByDay]);
 
   // Embedded lists can share an already-scrolled page rather than their own box.
@@ -152,10 +162,7 @@ export const ActivityTableMobile = ({
     getScrollElement: () => scrollElement,
     // Seed the offset before the virtualizer's initial scrollTo. Swipeable views
     // mount neighboring lists while the shared page may already be scrolled.
-    observeElementOffset: (instance, onChange) => {
-      onChange(instance.scrollElement?.scrollTop ?? 0, false);
-      return observeElementOffset(instance, onChange);
-    },
+    observeElementOffset: observeCurrentScrollOffset,
     estimateSize: (index) =>
       listItems[index]?.kind === "header"
         ? DAY_HEADING_HEIGHT
@@ -265,9 +272,16 @@ export const ActivityTableMobile = ({
 
     // Compact View
     if (isCompactView) {
-      const activityTypeLabel = localizeActivityTypeName(t, activity.activityType);
+      const activityTypeLabel = localizeActivityRowLabel(t, activity);
       return (
-        <Card key={activity.id} className="p-3">
+        <Card
+          key={activity.id}
+          className={cn(
+            "p-3",
+            activity.needsReview && ["relative overflow-hidden", NEEDS_REVIEW_CARD_CLASS],
+          )}
+        >
+          {activity.needsReview && <NeedsReviewStripe />}
           <div className="flex items-center gap-3">
             {(() => {
               const inner = (
@@ -281,8 +295,13 @@ export const ActivityTableMobile = ({
                   />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline justify-between gap-2">
-                      <p className="truncate font-semibold">{displaySymbol}</p>
-                      {activity.activityType !== "SPLIT" && (
+                      <p className="flex min-w-0 items-center gap-1.5 font-semibold">
+                        {activity.needsReview && (
+                          <NeedsReviewMark label={t("activity:detail.needs_review")} />
+                        )}
+                        <span className="truncate">{displaySymbol}</span>
+                      </p>
+                      {activity.activityType !== "SPLIT" && !isConversionRow(activity) && (
                         <AmountDisplay
                           value={displayValue}
                           currency={activity.currency}
@@ -354,7 +373,14 @@ export const ActivityTableMobile = ({
 
     // Detailed View
     return (
-      <Card key={activity.id} className="p-3">
+      <Card
+        key={activity.id}
+        className={cn(
+          "p-3",
+          activity.needsReview && ["relative overflow-hidden", NEEDS_REVIEW_CARD_CLASS],
+        )}
+      >
+        {activity.needsReview && <NeedsReviewStripe />}
         <div className="space-y-2">
           {/* Header: Symbol and Date */}
           <div className="flex items-start justify-between">
@@ -369,7 +395,12 @@ export const ActivityTableMobile = ({
                     className="h-10 w-10"
                   />
                   <div>
-                    <p className="font-semibold">{displaySymbol}</p>
+                    <p className="flex items-center gap-1.5 font-semibold">
+                      {activity.needsReview && (
+                        <NeedsReviewMark label={t("activity:detail.needs_review")} />
+                      )}
+                      {displaySymbol}
+                    </p>
                     <p className="text-muted-foreground text-xs">
                       {isCash ? activity.currency : (optionSubtitle ?? activity.assetName)}
                     </p>
@@ -456,7 +487,7 @@ export const ActivityTableMobile = ({
                       : t("activity:field_price")}
               </span>
               <span className="font-medium">
-                {activity.activityType === "FEE" ? (
+                {activity.activityType === "FEE" || isConversionRow(activity) ? (
                   "-"
                 ) : activity.activityType === "SPLIT" ? (
                   formatSplitRatio(Number(activity.amount))
@@ -505,7 +536,7 @@ export const ActivityTableMobile = ({
             )}
 
             {/* Total Value */}
-            {activity.activityType !== "SPLIT" && (
+            {activity.activityType !== "SPLIT" && !isConversionRow(activity) && (
               <div className="flex items-center justify-between border-t pt-1.5">
                 <span className="text-muted-foreground font-medium">
                   {t("activity:table.total_value")}

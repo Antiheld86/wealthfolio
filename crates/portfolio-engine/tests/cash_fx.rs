@@ -10,7 +10,9 @@ use support::{load_all_scenarios, Pipeline, Scenario};
 use wealthfolio_portfolio_engine::model::{
     AccountId, PerformanceResult, QualityNote, QualityStatus, SummaryStatus,
 };
-use wealthfolio_portfolio_engine::{measure_account, measure_scope, MeasureProfile, Window};
+use wealthfolio_portfolio_engine::{
+    measure_account, measure_scope, EngineError, MeasureProfile, Window,
+};
 
 fn scenario(kind: &str, cash: Decimal, security: Decimal) -> Scenario {
     let security_rows = if security.is_zero() {
@@ -67,14 +69,23 @@ fn expected_bucket_fx(pipeline: &Pipeline) -> Decimal {
 }
 
 fn check(kind: &str, cash: Decimal, security: Decimal, bounded: bool) {
-    let pipeline = Pipeline::from_scenario(&scenario(kind, cash, security));
+    let mut fixture = scenario(kind, cash, security);
+    if bounded {
+        // Leave the opening day outside the window, and move the rate
+        // change to day three so cash and investment FX remain in-period.
+        let end = "2026-01-03".parse().unwrap();
+        fixture.policy.as_of = end;
+        fixture.fx_rates[1].day = end;
+        fixture.quotes[1].day = end;
+    }
+    let pipeline = Pipeline::from_scenario(&fixture);
     assert_eq!(expected_bucket_fx(&pipeline), -cash * dec!(0.1));
     let lots = pipeline.lots();
     let inputs = pipeline.measure_inputs(&lots);
     let account = AccountId::new("acc");
     let window = Window {
-        start: bounded.then(|| "2026-01-01".parse().unwrap()),
-        end: bounded.then(|| "2026-01-02".parse().unwrap()),
+        start: bounded.then(|| "2026-01-02".parse().unwrap()),
+        end: bounded.then(|| "2026-01-03".parse().unwrap()),
     };
     let expected = -(cash + security) * dec!(0.1);
     for profile in [
@@ -105,12 +116,19 @@ fn check(kind: &str, cash: Decimal, security: Decimal, bounded: bool) {
                 assert_eq!(result.attribution.fx_effect, expected);
                 assert_eq!(result.attribution.income, Decimal::ZERO);
                 let days = &pipeline.series[&account].days;
-                let delta = days.last().unwrap().total_value_base
-                    - if bounded {
-                        days[0].total_value_base
-                    } else {
+                let opening = window
+                    .start
+                    .and_then(|start| days.iter().find(|day| day.date == start))
+                    .map_or(Decimal::ZERO, |day| day.total_value_base);
+                let delta = days.last().unwrap().total_value_base - opening;
+                assert_eq!(
+                    result.attribution.contributions,
+                    if bounded {
                         Decimal::ZERO
-                    };
+                    } else {
+                        (cash + security) * dec!(7)
+                    }
+                );
                 assert_eq!(
                     result.attribution.contributions - result.attribution.distributions
                         + result.attribution.pnl(),
@@ -139,6 +157,160 @@ fn cash_in_a_securities_account_is_attributed_without_a_position() {
 #[test]
 fn a_cash_fx_omission_below_warning_tolerance_is_still_incorrect() {
     check("SECURITIES", dec!(1), dec!(10000), false);
+}
+
+#[test]
+fn attribution_requires_cash_fx_preparation_even_below_residual_tolerance() {
+    let p = Pipeline::from_scenario(&scenario("SECURITIES", dec!(1), dec!(10000)));
+    let lots = p.lots();
+    let inputs = p.engine.measure_inputs(
+        &p.series,
+        &lots,
+        &p.bundle.disposals,
+        &p.bundle.rejected_activities(),
+        MeasureProfile::Dashboard,
+    );
+    let account = AccountId::new("acc");
+    for profile in [MeasureProfile::Full, MeasureProfile::Summary] {
+        for scoped in [false, true] {
+            let result = if scoped {
+                measure_scope(
+                    &inputs,
+                    "scope",
+                    std::slice::from_ref(&account),
+                    Window::default(),
+                    profile,
+                    false,
+                )
+            } else {
+                measure_account(&inputs, &account, Window::default(), profile, false)
+            };
+            assert!(
+                matches!(result, Err(EngineError::CashFxNotPrepared { account }) if account == "acc")
+            );
+        }
+    }
+}
+
+#[test]
+fn missing_account_preparation_is_rejected() {
+    let p = Pipeline::from_scenario(&scenario("CASH", dec!(1000), dec!(0)));
+    let lots = p.lots();
+    let mut inputs = p.measure_inputs(&lots);
+    inputs
+        .cash_fx
+        .as_mut()
+        .unwrap()
+        .remove(&AccountId::new("acc"));
+    for scoped in [false, true] {
+        let account = AccountId::new("acc");
+        let result = if scoped {
+            measure_scope(
+                &inputs,
+                "scope",
+                &[account],
+                Window::default(),
+                MeasureProfile::Summary,
+                false,
+            )
+        } else {
+            measure_account(
+                &inputs,
+                &account,
+                Window::default(),
+                MeasureProfile::Summary,
+                false,
+            )
+        };
+        assert!(
+            matches!(result, Err(EngineError::CashFxNotPrepared { account }) if account == "acc")
+        );
+    }
+}
+
+#[test]
+fn prepared_zero_cash_fx_is_distinct_from_missing_preparation() {
+    let mut s = scenario("CASH", dec!(1000), dec!(0));
+    s.policy.base_currency = "USD".into();
+    let p = Pipeline::from_scenario(&s);
+    let lots = p.lots();
+    let inputs = p.measure_inputs(&lots);
+    let account = AccountId::new("acc");
+    assert!(inputs.cash_fx.as_ref().unwrap()[&account].is_empty());
+    for profile in [
+        MeasureProfile::Full,
+        MeasureProfile::Summary,
+        MeasureProfile::Dashboard,
+    ] {
+        assert_complete(
+            &measure_account(&inputs, &account, Window::default(), profile, false).unwrap(),
+            dec!(0),
+        );
+        assert_complete(
+            &measure_scope(
+                &inputs,
+                "scope",
+                std::slice::from_ref(&account),
+                Window::default(),
+                profile,
+                false,
+            )
+            .unwrap(),
+            dec!(0),
+        );
+    }
+}
+
+#[test]
+fn holdings_only_attribution_does_not_require_transaction_cash_fx() {
+    let p = pipeline(
+        r#"
+id: CASH-FX-HOLDINGS-PREPARATION
+policy: { base_currency: USD, timezone: UTC, as_of: 2026-01-02 }
+accounts:
+  - { id: acc, currency: USD, tracking_mode: HOLDINGS }
+observed_snapshots:
+  - { account: acc, date: 2026-01-01, cash: { USD: 1000 } }
+  - { account: acc, date: 2026-01-02, cash: { USD: 1000 } }
+"#,
+    );
+    let lots = p.lots();
+    let inputs = p.engine.measure_inputs(
+        &p.series,
+        &lots,
+        &p.bundle.disposals,
+        &p.bundle.rejected_activities(),
+        MeasureProfile::Dashboard,
+    );
+    assert!(inputs.cash_fx.is_none());
+    let prepared = p.measure_inputs(&lots);
+    let account = AccountId::new("acc");
+    for profile in [MeasureProfile::Full, MeasureProfile::Summary] {
+        assert_eq!(
+            measure_account(&inputs, &account, Window::default(), profile, false).unwrap(),
+            measure_account(&prepared, &account, Window::default(), profile, false).unwrap(),
+        );
+        assert_eq!(
+            measure_scope(
+                &inputs,
+                "scope",
+                std::slice::from_ref(&account),
+                Window::default(),
+                profile,
+                false,
+            )
+            .unwrap(),
+            measure_scope(
+                &prepared,
+                "scope",
+                std::slice::from_ref(&account),
+                Window::default(),
+                profile,
+                false,
+            )
+            .unwrap(),
+        );
+    }
 }
 
 #[test]
@@ -441,8 +613,9 @@ fn missing_cash_fx_is_reported_even_when_the_residual_is_small() {
     let lots = p.lots();
     let mut inputs = p.measure_inputs(&lots);
     inputs
-        .effects
         .cash_fx
+        .as_mut()
+        .unwrap()
         .get_mut(&AccountId::new("acc"))
         .unwrap()[0]
         .amount = None;
@@ -556,8 +729,9 @@ fx_rates:
     let lots = p.lots();
     let inputs = p.measure_inputs(&lots);
     assert!(!inputs
-        .effects
         .cash_fx
+        .as_ref()
+        .unwrap()
         .contains_key(&AccountId::new("holdings")));
     for window in [
         Window::default(),
@@ -592,7 +766,7 @@ fn unavailable_rates_never_become_zero_cash_fx_with_ok_quality() {
     let p = Pipeline::from_scenario(&scenario);
     let lots = p.lots();
     let inputs = p.measure_inputs(&lots);
-    let cash_fx = &inputs.effects.cash_fx[&AccountId::new("acc")];
+    let cash_fx = &inputs.cash_fx.as_ref().unwrap()[&AccountId::new("acc")];
     assert_eq!(cash_fx.len(), 1);
     assert_eq!(cash_fx[0].amount, None);
     for scoped in [false, true] {
@@ -907,7 +1081,7 @@ fn dashboard_preparation_skips_cash_fx_without_changing_its_outputs() {
             profile,
         );
         assert_eq!(
-            inputs.effects.cash_fx.is_empty(),
+            inputs.cash_fx.is_none(),
             profile == MeasureProfile::Dashboard
         );
         for scoped in [false, true] {
@@ -941,7 +1115,7 @@ fn missing_cash_fx_keeps_known_days_and_marks_the_subtotal_partial() {
     let lots = p.lots();
     let mut inputs = p.measure_inputs(&lots);
     let scope = p.portfolio_scope();
-    let days = inputs.effects.cash_fx.get_mut(&scope[0]).unwrap();
+    let days = inputs.cash_fx.as_mut().unwrap().get_mut(&scope[0]).unwrap();
     assert_eq!(days.len(), 2);
     days[0].amount = None;
     for scoped in [false, true] {
@@ -998,8 +1172,9 @@ fn priced_cash_fx_matches_projected_currency_exposure_across_the_fixture_corpus(
         let lots = p.lots();
         let inputs = p.measure_inputs(&lots);
         let actual = inputs
-            .effects
             .cash_fx
+            .as_ref()
+            .unwrap()
             .values()
             .flatten()
             .try_fold(Decimal::ZERO, |total, day| {
@@ -1112,6 +1287,8 @@ fn assert_bounded_cash_fx(p: &Pipeline, expected: Decimal) {
 
 #[test]
 fn small_cash_exposures_are_valued_before_combining_large_rates() {
+    // Open before the measured window to test period cash FX separately
+    // from inception contribution conversion at these extreme rates.
     let p = pipeline(
         r#"
 id: CASH-FX-SMALL-EXPOSURE
@@ -1119,10 +1296,12 @@ policy: { base_currency: CNY, timezone: UTC, as_of: 2026-01-02 }
 accounts:
   - { id: acc, currency: EUR, account_type: CASH }
 activities:
-  - { id: dep, account: acc, type: DEPOSIT, date: 2026-01-01T10:00:00Z, amount: 0.000001, currency: USD }
+  - { id: dep, account: acc, type: DEPOSIT, date: 2025-12-31T10:00:00Z, amount: 0.000001, currency: USD }
 fx_rates:
+  - { from: USD, to: EUR, day: 2025-12-31, rate: 100000000000 }
   - { from: USD, to: EUR, day: 2026-01-01, rate: 100000000000 }
   - { from: USD, to: EUR, day: 2026-01-02, rate: 100000000000 }
+  - { from: EUR, to: CNY, day: 2025-12-31, rate: 10000000000 }
   - { from: EUR, to: CNY, day: 2026-01-01, rate: 10000000000 }
   - { from: EUR, to: CNY, day: 2026-01-02, rate: 11000000000 }
 "#,
@@ -1191,4 +1370,28 @@ fx_rates:
 "#,
     );
     assert_bounded_cash_fx(&p, dec!(-1000000000000000000));
+}
+
+#[test]
+fn opposing_cash_buckets_are_netted_before_reporting_currency_conversion() {
+    let p = pipeline(
+        r#"
+id: CASH-FX-NET-BEFORE-BASE
+policy: { base_currency: USD, timezone: UTC, as_of: 2026-01-02 }
+accounts:
+  - { id: acc, currency: EUR, account_type: CASH }
+activities:
+  - { id: cad, account: acc, type: DEPOSIT, date: 2026-01-01T10:00:00Z, amount: 1, currency: CAD }
+  - { id: gbp, account: acc, type: WITHDRAWAL, date: 2026-01-01T11:00:00Z, amount: 1, currency: GBP }
+fx_rates:
+  - { from: CAD, to: EUR, day: 2026-01-01, rate: 1 }
+  - { from: CAD, to: EUR, day: 2026-01-02, rate: 2 }
+  - { from: GBP, to: EUR, day: 2026-01-01, rate: 0.9 }
+  - { from: GBP, to: EUR, day: 2026-01-02, rate: 1.8 }
+  - { from: EUR, to: USD, day: 2026-01-01, rate: "100000000000000000000" }
+  - { from: EUR, to: USD, day: 2026-01-02, rate: "100000000000000000000" }
+"#,
+    );
+    assert!(p.bundle.rejected_activities().is_empty());
+    assert_bounded_cash_fx(&p, dec!(10000000000000000000));
 }

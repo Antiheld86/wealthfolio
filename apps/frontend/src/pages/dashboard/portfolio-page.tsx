@@ -1,6 +1,5 @@
 import { HealthStatusIndicator } from "@/components/health-status-icon";
 import { SwipablePage, SwipablePageView } from "@/components/page";
-import { PrivacyToggle } from "@/components/privacy-toggle";
 import { AlternativeAssetQuickAddModal } from "@/pages/asset/alternative-assets/components";
 import { useNavigationMode } from "@/pages/layouts/navigation/navigation-mode-context";
 import { AlternativeAssetKind } from "@/lib/types";
@@ -85,7 +84,7 @@ export default function PortfolioPage() {
         <Button
           variant="secondary"
           size="icon-xs"
-          className="bg-secondary/50 rounded-full"
+          className="rounded-full"
           onClick={toggleFocusMode}
           aria-label={t("common:component.exit_focus_mode")}
         >
@@ -109,7 +108,6 @@ export default function PortfolioPage() {
   const netWorthActions = (
     <>
       {commonActions}
-      <PrivacyToggle />
       <DashboardActions onAddAsset={handleAddAsset} onAddLiability={handleAddLiability} />
     </>
   );
@@ -167,12 +165,7 @@ export default function PortfolioPage() {
             <SpendingTabContent />
           </Suspense>
         ),
-        actions: (
-          <>
-            {commonActions}
-            <PrivacyToggle />
-          </>
-        ),
+        actions: commonActions,
       });
     }
     return items;

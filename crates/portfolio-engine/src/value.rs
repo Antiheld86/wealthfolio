@@ -18,7 +18,7 @@ use crate::arith;
 use crate::compile::CompiledLedger;
 use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::error::EngineError;
-use crate::measure::{MeasureInputs, MeasureProfile};
+use crate::measure::{CashFxEffect, MeasureInputs, MeasureProfile};
 use crate::model::*;
 use crate::project::{in_position_currency, lot_records, position_book_cost, QUANTITY_THRESHOLD};
 use crate::resolve::{FxResolver, ResolvedSurfaces};
@@ -1336,8 +1336,8 @@ pub fn effects(
     priced_events(resolved, disposals, &transfers, rejected, None).0
 }
 
-/// Prepare the priced inputs for a stored-row performance read. Use the same
-/// profile when measuring: Dashboard needs flows but no cash FX attribution.
+/// Prepare the priced inputs for a stored-row performance read. Dashboard
+/// skips cash FX; Full/Summary inputs can also serve shallower reads.
 pub fn measure_inputs<'a>(
     resolved: &Resolved<'_>,
     series: &'a BTreeMap<AccountId, ValuationSeries>,
@@ -1346,12 +1346,12 @@ pub fn measure_inputs<'a>(
     rejected: &BTreeSet<ActivityId>,
     profile: MeasureProfile,
 ) -> MeasureInputs<'a> {
-    let mut effects = effects(resolved, disposals, lots, rejected);
-    if profile != MeasureProfile::Dashboard {
-        effects.cash_fx = cash_fx_effects(resolved, series, rejected);
-    }
+    let effects = effects(resolved, disposals, lots, rejected);
+    let cash_fx =
+        (profile != MeasureProfile::Dashboard).then(|| cash_fx_effects(resolved, series, rejected));
     MeasureInputs {
         effects,
+        cash_fx,
         series,
         lots,
         disposals,
@@ -1394,16 +1394,29 @@ pub(crate) fn cash_fx_effects(
         let mut known = true;
         let mut daily = Vec::new();
         let account_currency = policy.major_currency(account.currency.as_str());
-        // Use the same bucket -> account -> base path as value_day, also
-        // when a direct bucket -> base observation would choose another path.
-        let cash_value = |currency: &Currency, units: Decimal, date| {
-            let (major, factor) = policy.normalize_currency(currency.as_str());
-            arith::product(&[
-                units,
-                factor,
-                fx.rate(major, account_currency, date)?,
-                fx.rate(account_currency, base, date)?,
-            ])
+        // Match value_day: convert each bucket to the account's major currency,
+        // net balances there, then convert the total to base. Converting each
+        // gross bucket to base first can exceed the bound despite a valid net.
+        let cash_value = |cash: &BTreeMap<&Currency, Decimal>, date| {
+            let account_value =
+                cash.iter()
+                    .try_fold(Decimal::ZERO, |total, (currency, units)| {
+                        if units.is_zero() {
+                            return Some(total);
+                        }
+                        let (major, factor) = policy.normalize_currency(currency.as_str());
+                        let amount = arith::product(&[
+                            *units,
+                            factor,
+                            fx.rate(major, account_currency, date)?,
+                        ])?;
+                        total.checked_add(amount)
+                    })?;
+            if account_value.is_zero() {
+                Some(Decimal::ZERO)
+            } else {
+                arith::mul(account_value, fx.rate(account_currency, base, date)?)
+            }
         };
         for date in first.date.iter_days().take_while(|day| *day <= last.date) {
             if date > first.date {
@@ -1412,18 +1425,8 @@ pub(crate) fn cash_fx_effects(
                     .expect("a day after the first has a predecessor");
                 let amount = known
                     .then(|| {
-                        cash.iter()
-                            .try_fold(Decimal::ZERO, |total, (currency, units)| {
-                                if units.is_zero() {
-                                    return Some(total);
-                                }
-                                // Multiply units first, as valuation does: a
-                                // combined rate can exceed the range even when
-                                // the value of a small exposure is representable.
-                                let change = cash_value(currency, *units, date)?
-                                    - cash_value(currency, *units, previous)?;
-                                total.checked_add(change)
-                            })
+                        cash_value(&cash, date)?
+                            .checked_sub(cash_value(&cash, previous)?)
                             .and_then(arith::bounded)
                     })
                     .flatten();
@@ -1776,7 +1779,6 @@ fn priced_events(
             })
             .collect(),
         events,
-        cash_fx: BTreeMap::new(),
         pairs: facts
             .transfer_pairs
             .iter()
@@ -1792,6 +1794,24 @@ fn priced_events(
                 security: pair.security,
                 contribution_neutral: pair.contribution_neutral,
             })
+            // A conversion moves lots within its account as a transfer pair
+            // does: the lots it opens keep their purchase charges, counted
+            // where they were paid (rules R7.5, R3.5). It has no flow to net.
+            .chain(
+                facts
+                    .conversions
+                    .iter()
+                    .filter(|pair| !rejected.contains(&pair.out_activity))
+                    .map(|pair| PairEffect {
+                        group: pair.group_id.clone(),
+                        transfer_in: pair.in_activity.clone(),
+                        transfer_out: pair.out_activity.clone(),
+                        in_account: pair.account.clone(),
+                        out_account: pair.account.clone(),
+                        security: true,
+                        contribution_neutral: false,
+                    }),
+            )
             .collect(),
     };
     (effects, diagnostics)

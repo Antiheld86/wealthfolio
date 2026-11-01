@@ -7,11 +7,12 @@ import type { Account, Platform } from "@/lib/types";
 import { useQuery } from "@tanstack/react-query";
 import {
   Button,
+  Card,
+  CardContent,
   Icons,
   Separator,
   Skeleton,
-  ToggleGroup,
-  ToggleGroupItem,
+  AnimatedToggleGroup,
   buttonVariants,
   Empty,
   EmptyHeader,
@@ -26,6 +27,7 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { SettingsHeader } from "../settings-header";
 import { AccountEditModal } from "./components/account-edit-modal";
+import { SettingsList } from "@/components/settings-list";
 import { AccountItem } from "./components/account-item";
 import { useAccountMutations } from "./components/use-account-mutations";
 import { badgeVariants } from "@wealthfolio/ui";
@@ -151,15 +153,16 @@ const SettingsAccountsPage = () => {
   }
 
   const renderAccountItem = (account: Account) => (
-    <AccountItem
-      key={account.id}
-      account={account}
-      platform={account.platformId ? platformMap.get(account.platformId) : undefined}
-      onEdit={handleEditAccount}
-      onDelete={handleDeleteAccount}
-      onArchive={handleArchiveAccount}
-      onHide={handleHideAccount}
-    />
+    <li key={account.id}>
+      <AccountItem
+        account={account}
+        platform={account.platformId ? platformMap.get(account.platformId) : undefined}
+        onEdit={handleEditAccount}
+        onDelete={handleDeleteAccount}
+        onArchive={handleArchiveAccount}
+        onHide={handleHideAccount}
+      />
+    </li>
   );
 
   const showSections = filter === "all";
@@ -168,7 +171,7 @@ const SettingsAccountsPage = () => {
     <>
       <div data-testid="settings-accounts-page" className="space-y-6">
         <SettingsHeader
-          heading={t("settings:accounts_title")}
+          heading={t("settings:nav.items.accounts")}
           text={t("settings:accounts_description")}
           actionsInline
         >
@@ -205,7 +208,7 @@ const SettingsAccountsPage = () => {
               placeholder={t("settings:accounts.search_placeholder")}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="!h-9 pe-9 ps-9 text-sm"
+              className="!h-9 ps-9 pe-9 text-sm"
             />
             {searchQuery && (
               <button
@@ -219,36 +222,17 @@ const SettingsAccountsPage = () => {
             )}
           </div>
 
-          <ToggleGroup
-            value={[filter]}
-            onValueChange={([value]) => value && setFilter(value as FilterType)}
-            className="bg-muted h-9 rounded-md p-1"
-          >
-            <ToggleGroupItem
-              value="all"
-              className="aria-pressed:bg-background h-7 rounded px-3 text-xs"
-            >
-              {t("settings:accounts.filter_all")}
-            </ToggleGroupItem>
-            <ToggleGroupItem
-              value="active"
-              className="aria-pressed:bg-background h-7 rounded px-3 text-xs"
-            >
-              {t("settings:accounts.filter_active")}
-            </ToggleGroupItem>
-            <ToggleGroupItem
-              value="hidden"
-              className="aria-pressed:bg-background h-7 rounded px-3 text-xs"
-            >
-              {t("settings:accounts.filter_hidden")}
-            </ToggleGroupItem>
-            <ToggleGroupItem
-              value="archived"
-              className="aria-pressed:bg-background h-7 rounded px-3 text-xs"
-            >
-              {t("settings:accounts.filter_archived")}
-            </ToggleGroupItem>
-          </ToggleGroup>
+          <AnimatedToggleGroup<FilterType>
+            size="sm"
+            value={filter}
+            onValueChange={setFilter}
+            items={[
+              { value: "all", label: t("settings:accounts.filter_all") },
+              { value: "active", label: t("settings:accounts.filter_active") },
+              { value: "hidden", label: t("settings:accounts.filter_hidden") },
+              { value: "archived", label: t("settings:accounts.filter_archived") },
+            ]}
+          />
         </div>
 
         {/* Account Lists */}
@@ -294,9 +278,13 @@ const SettingsAccountsPage = () => {
                       {counts.active}
                     </span>
                   </div>
-                  <div className="divide-border bg-card divide-y rounded-md border">
-                    {activeAccounts.map(renderAccountItem)}
-                  </div>
+                  <Card>
+                    <CardContent className="pt-6">
+                      <SettingsList label={t("settings:accounts.section_active")}>
+                        {activeAccounts.map(renderAccountItem)}
+                      </SettingsList>
+                    </CardContent>
+                  </Card>
                 </div>
               )}
 
@@ -311,17 +299,25 @@ const SettingsAccountsPage = () => {
                       {counts.hidden + counts.archived}
                     </span>
                   </div>
-                  <div className="divide-border bg-card divide-y rounded-md border">
-                    {inactiveAccounts.map(renderAccountItem)}
-                  </div>
+                  <Card>
+                    <CardContent className="pt-6">
+                      <SettingsList label={t("settings:accounts.section_hidden_archived")}>
+                        {inactiveAccounts.map(renderAccountItem)}
+                      </SettingsList>
+                    </CardContent>
+                  </Card>
                 </div>
               )}
             </>
           ) : (
             /* Flat list when filtered */
-            <div className="divide-border bg-card divide-y rounded-md border">
-              {filteredAccounts.map(renderAccountItem)}
-            </div>
+            <Card>
+              <CardContent className="pt-6">
+                <SettingsList label={t("settings:nav.items.accounts")}>
+                  {filteredAccounts.map(renderAccountItem)}
+                </SettingsList>
+              </CardContent>
+            </Card>
           )}
         </div>
       </div>

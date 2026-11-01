@@ -19,6 +19,7 @@ const ACTIVITY_TYPE_TEST_IDS: Record<string, string> = {
 interface E2ESettings {
   language?: string;
   onboardingCompleted?: boolean;
+  autoUpdateCheckEnabled?: boolean;
 }
 
 interface AuthStatus {
@@ -69,10 +70,22 @@ async function getE2ESettings(page: Page) {
 
 async function canSkipLoginAndOnboardingUi(page: Page) {
   const [authDisabled, settings] = await Promise.all([isAuthDisabled(page), getE2ESettings(page)]);
+  if (authDisabled) await disableAutoUpdateCheck(page, settings);
   if (!authDisabled || !settings?.onboardingCompleted) return false;
 
   await ensureE2ELanguage(page, settings);
   return true;
+}
+
+// When the release feed has a newer version than this checkout, the app opens an
+// update dialog that blocks clicks. Turn the check off before the app loads.
+async function disableAutoUpdateCheck(page: Page, settings: E2ESettings | null) {
+  if (settings?.autoUpdateCheckEnabled === false) return;
+
+  const updated = await putApiJson<E2ESettings>(page, "/settings", {
+    autoUpdateCheckEnabled: false,
+  });
+  expect(updated?.autoUpdateCheckEnabled, "turn off automatic update checks").toBe(false);
 }
 
 async function ensureE2ELanguage(page: Page, settings?: E2ESettings | null) {
@@ -243,22 +256,6 @@ export async function selectActivityType(page: Page, type: string) {
   await expect(typeButton).toBeVisible();
   await typeButton.click();
   await page.waitForTimeout(200);
-}
-
-/**
- * Toasts stay clickable above dialogs, and a loading toast such as "Calculating
- * portfolio performance…" can cover a dialog's buttons for a while. Before each
- * action, wait for a visible loading toast to finish, as a person would.
- */
-export async function waitOutLoadingToasts(page: Page) {
-  const loadingToasts = page.locator('[data-sonner-toast][data-type="loading"]');
-  await page.addLocatorHandler(
-    loadingToasts.first(),
-    async () => {
-      await expect(loadingToasts).toHaveCount(0, { timeout: 120_000 });
-    },
-    { noWaitAfter: true },
-  );
 }
 
 // A select mounts its options, hidden, once its trigger has had focus, and a

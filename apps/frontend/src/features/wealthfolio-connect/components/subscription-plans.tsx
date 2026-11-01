@@ -15,7 +15,7 @@ import {
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { Popover, PopoverContent, PopoverTrigger } from "@wealthfolio/ui/components/ui/popover";
 import { Skeleton } from "@wealthfolio/ui/components/ui/skeleton";
-import { ToggleGroup, ToggleGroupItem } from "@wealthfolio/ui/components/ui/toggle-group";
+import { AnimatedToggleGroup } from "@wealthfolio/ui/components/ui/animated-toggle-group";
 import { toast } from "@wealthfolio/ui/components/ui/use-toast";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -24,6 +24,7 @@ import { useWealthfolioConnect } from "../providers/wealthfolio-connect-provider
 import { getSubscriptionPlans } from "../services/broker-service";
 import type { BillingPeriod, SubscriptionPlan } from "../types";
 import { statusSurfaceVariants } from "@wealthfolio/ui/components/ui/status-surface";
+import { copyText } from "@wealthfolio/ui/lib/clipboard";
 
 // Helper to detect if error is an auth/token issue
 function isAuthError(error: Error | null): boolean {
@@ -209,7 +210,7 @@ export function SubscriptionPlans({
       <Card className={statusSurfaceVariants({ status: "warning" })}>
         <CardContent className="py-8">
           <div className="flex flex-col items-center justify-center text-center">
-            <div className="text-warning-subtle-foreground bg-current/15 mb-4 rounded-full p-4">
+            <div className="text-warning-subtle-foreground mb-4 rounded-full bg-current/15 p-4">
               <Icons.AlertCircle className="h-8 w-8" />
             </div>
             <h3 className="text-foreground mb-2 text-base font-medium">
@@ -234,7 +235,7 @@ export function SubscriptionPlans({
                       className="size-11 sm:size-7"
                       aria-label={t("connect:subscription.copySupportEmail")}
                       onClick={() => {
-                        navigator.clipboard.writeText("support@wealthfolio.app");
+                        copyText("support@wealthfolio.app");
                         toast.success(t("connect:subscription.emailCopied"));
                       }}
                     >
@@ -275,7 +276,7 @@ export function SubscriptionPlans({
       <Card className={statusSurfaceVariants({ status: "warning" })}>
         <CardContent className="py-8">
           <div className="flex flex-col items-center justify-center text-center">
-            <div className="text-warning-subtle-foreground bg-current/15 mb-4 rounded-full p-4">
+            <div className="text-warning-subtle-foreground mb-4 rounded-full bg-current/15 p-4">
               <Icons.CloudOff className="h-8 w-8" />
             </div>
             <h3 className="text-foreground mb-2 text-base font-medium">
@@ -300,7 +301,7 @@ export function SubscriptionPlans({
                       className="size-11 sm:size-7"
                       aria-label={t("connect:subscription.copySupportEmail")}
                       onClick={() => {
-                        navigator.clipboard.writeText("support@wealthfolio.app");
+                        copyText("support@wealthfolio.app");
                         toast.success(t("connect:subscription.emailCopied"));
                       }}
                     >
@@ -332,26 +333,23 @@ export function SubscriptionPlans({
               {t("connect:subscription.choosePlanDescription")}
             </CardDescription>
           </div>
-          <ToggleGroup
-            value={[billingPeriod]}
-            onValueChange={([value]) => value && setBillingPeriod(value as BillingPeriod)}
-            className="bg-muted h-8 rounded-md p-0.5"
-          >
-            <ToggleGroupItem
-              value="monthly"
-              aria-label={t("connect:subscription.monthlyBilling")}
-              className="aria-pressed:bg-background h-7 rounded px-3 text-xs aria-pressed:shadow-sm"
-            >
-              {t("connect:subscription.monthly")}
-            </ToggleGroupItem>
-            <ToggleGroupItem
-              value="yearly"
-              aria-label={t("connect:subscription.yearlyBilling")}
-              className="aria-pressed:bg-background h-7 rounded px-3 text-xs aria-pressed:shadow-sm"
-            >
-              {t("connect:subscription.yearly")}
-            </ToggleGroupItem>
-          </ToggleGroup>
+          <AnimatedToggleGroup<BillingPeriod>
+            size="xs"
+            value={billingPeriod}
+            onValueChange={setBillingPeriod}
+            items={[
+              {
+                value: "monthly",
+                label: t("connect:subscription.monthly"),
+                "aria-label": t("connect:subscription.monthlyBilling"),
+              },
+              {
+                value: "yearly",
+                label: t("connect:subscription.yearly"),
+                "aria-label": t("connect:subscription.yearlyBilling"),
+              },
+            ]}
+          />
         </div>
       </CardHeader>
       <CardContent className="pt-0">

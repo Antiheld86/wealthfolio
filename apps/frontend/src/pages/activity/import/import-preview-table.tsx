@@ -1,3 +1,4 @@
+import { formatActivityFieldName } from "../utils/validation-labels";
 import {
   ColumnDef,
   ColumnFiltersState,
@@ -27,6 +28,7 @@ import { DataTableFacetedFilterProps } from "@wealthfolio/ui/components/ui/data-
 import { DataTablePagination } from "@wealthfolio/ui/components/ui/data-table/data-table-pagination";
 import { DataTableToolbar } from "@wealthfolio/ui/components/ui/data-table/data-table-toolbar";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
+import { Card } from "@wealthfolio/ui/components/ui/card";
 import {
   Table,
   TableBody,
@@ -182,9 +184,9 @@ export const ImportPreviewTable = ({
     <div className="pt-0">
       <div className="space-y-2">
         <DataTableToolbar table={table} searchBy="symbol" filters={filters} />
-        <div className="rounded-md border">
+        <Card className="overflow-clip">
           <Table>
-            <TableHeader className="bg-muted/40">
+            <TableHeader>
               {table.getHeaderGroups().map((headerGroup) => (
                 <TableRow key={headerGroup.id}>
                   {headerGroup.headers.map((header) => (
@@ -243,7 +245,7 @@ export const ImportPreviewTable = ({
               )}
             </TableBody>
           </Table>
-        </div>
+        </Card>
       </div>
 
       <DataTablePagination table={table} />
@@ -277,7 +279,7 @@ const ErrorCell = ({
             <Icons.AlertCircle className="text-destructive h-3.5 w-3.5 shrink-0" />
           </div>
         </TooltipTrigger>
-        <TooltipContent className="max-w-100 flex flex-col gap-2 p-3">
+        <TooltipContent className="flex max-w-100 flex-col gap-2 p-3">
           <ul className="list-disc space-y-1 ps-5 text-sm">
             {errorMessages.map((error, index) => (
               <li key={index}>{error}</li>
@@ -313,12 +315,12 @@ function getColumns(
 
         // Format all errors for tooltip display
         const allErrors = Object.entries(errors).flatMap(([field, fieldErrors]) =>
-          fieldErrors.map((err) => `${field}: ${err}`),
+          fieldErrors.map((err) => `${formatActivityFieldName(field)}: ${err}`),
         );
 
         return isValid ? (
-          <div className="w-15 flex items-center gap-1 text-xs">
-            <div className="text-success-subtle-foreground bg-current/15 flex h-5 w-5 items-center justify-center rounded-full">
+          <div className="flex w-15 items-center gap-1 text-xs">
+            <div className="text-success-subtle-foreground flex h-5 w-5 items-center justify-center rounded-full bg-current/15">
               <Icons.CheckCircle className="h-3.5 w-3.5" />
             </div>
             <span className="text-muted-foreground text-xs">
@@ -330,9 +332,9 @@ function getColumns(
             <Tooltip>
               <TooltipTrigger
                 delay={30}
-                render={<div className="w-15 flex cursor-help items-center gap-1 text-xs" />}
+                render={<div className="flex w-15 cursor-help items-center gap-1 text-xs" />}
               >
-                <div className="text-destructive-subtle-foreground bg-current/15 flex h-5 w-5 items-center justify-center rounded-full">
+                <div className="text-destructive-subtle-foreground flex h-5 w-5 items-center justify-center rounded-full bg-current/15">
                   <Icons.XCircle className="h-3.5 w-3.5" />
                 </div>
                 <span className="text-muted-foreground text-xs">

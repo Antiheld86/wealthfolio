@@ -1,3 +1,4 @@
+import i18n from "i18next";
 import type { AddonManifest, Permission, SidebarItemConfig } from "@wealthfolio/addon-sdk";
 import type { AddonAsset, AddonFile } from "@/adapters/types";
 import {
@@ -9,6 +10,7 @@ import {
   removeAddonRoute,
 } from "@/addons/addons-runtime-context";
 import { loadAddonAsset, logger } from "@/adapters";
+import { generateId, generateSecureUuid } from "@/lib/id";
 import { toast } from "sonner";
 import { collectAddonThemeSnapshot, type AddonThemeSnapshot } from "./addon-sandbox-theme";
 import {
@@ -126,7 +128,7 @@ interface SandboxMessage {
 }
 
 function createNonce() {
-  return crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36)}`;
+  return generateSecureUuid();
 }
 
 function createAddonLoadCancelledError(addonId: string, reason = "was unloaded before it loaded") {
@@ -168,7 +170,7 @@ function createSandboxBootstrapParams(
 }
 
 function makeRequestId() {
-  return crypto.randomUUID?.() ?? Math.random().toString(36).slice(2);
+  return generateId();
 }
 
 function formatUnknownError(error: unknown) {
@@ -227,7 +229,7 @@ function notifyPermissionDenialOnce(addonId: string, method: string | undefined,
     return;
   }
   notifiedPermissionDenials.add(key);
-  toast.error("Add-on permission denied", {
+  toast.error(i18n.t("common:notifications.add_on_permission_denied"), {
     description: `'${addonId}' tried to use '${method ?? "an API"}' without permission. Updating the add-on may fix this.`,
     duration: 15000,
   });
@@ -292,7 +294,7 @@ function notifyClassifiedAddonErrorOnce(addonId: string, rawMessage: string | un
     return;
   }
   notifiedRuntimeErrors.add(key);
-  toast.error(`Add-on '${addonId}' error`, {
+  toast.error(i18n.t("common:notifications.addon_error", { addonId }), {
     description: hint,
     duration: 15000,
   });
@@ -363,6 +365,14 @@ export const ALLOWED_API_METHODS = new Set([
   "exchangeRates.add",
   "exchangeRates.getRatesForDates",
   "spending.isEnabled",
+  "spending.getContext",
+  "spending.getBudget",
+  "spending.getEvents",
+  "spending.getEventTypes",
+  "spending.assignCategory",
+  "spending.unassignCategory",
+  "spending.setEvent",
+  "spending.upsertBudgetTarget",
   "spending.searchCashActivities",
   "spending.getReport",
   "spending.getCategories",
@@ -476,11 +486,11 @@ export class AddonIframeManager {
     if (input.isCurrent?.() === false) {
       throw createAddonLoadCancelledError(input.addonId, "load was superseded by a reload");
     }
+    const nonce = createNonce();
     this.ensureListener();
     this.ensureThemeObserver();
     this.ensureLocalizationListener();
 
-    const nonce = createNonce();
     const initialTheme = collectAddonThemeSnapshot();
     const initialLocalization = collectAddonLocalizationSnapshot();
     const sandboxBootstrapParams = createSandboxBootstrapParams(
@@ -1228,7 +1238,7 @@ export class AddonIframeManager {
 
     this.themeObserver = new MutationObserver(this.scheduleThemeBroadcast);
     this.themeObserver.observe(document.documentElement, {
-      attributeFilter: ["class", "style"],
+      attributeFilter: ["class", "style", "data-theme", "data-text-size", "data-gain-colors"],
       attributes: true,
     });
     this.themeObserver.observe(document.body, {

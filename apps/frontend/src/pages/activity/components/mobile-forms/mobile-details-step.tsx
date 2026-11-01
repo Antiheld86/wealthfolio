@@ -95,7 +95,7 @@ function FmvPerUnitLabel() {
   const { t } = useTranslation();
   return (
     <div className="flex items-center gap-1.5">
-      <FormLabel className="text-base font-medium">
+      <FormLabel className="text-base leading-none font-medium">
         {t("activity:form.label_fmv_per_unit")}
       </FormLabel>
       <Tooltip>
@@ -226,6 +226,7 @@ export function MobileDetailsStep({
             fee: optFee,
             tax: optTax,
             contractMultiplier: isOption ? optMultiplier : undefined,
+            currency,
           })
         : undefined,
     [
@@ -239,6 +240,7 @@ export function MobileDetailsStep({
       optTax,
       isOption,
       optMultiplier,
+      currency,
     ],
   );
   const calculatedTradeAmount =
@@ -468,7 +470,12 @@ export function MobileDetailsStep({
     if (isEditing && !shouldDirty) return;
     const computedAmount = isBuyOrSell
       ? calculatedTradeAmount
-      : calculateIncomeFinalAmount(quantity, unitPrice, symbolInstrumentType);
+      : calculateIncomeFinalAmount({
+          quantity,
+          unitPrice,
+          instrumentType: symbolInstrumentType,
+          currency,
+        });
     if (computedAmount === undefined || Number(getValues("amount")) === computedAmount) return;
     setValue("amount" as any, computedAmount, {
       shouldDirty,
@@ -476,6 +483,7 @@ export function MobileDetailsStep({
     });
   }, [
     calculatedTradeAmount,
+    currency,
     symbolInstrumentType,
     getFieldState,
     getValues,
@@ -557,7 +565,7 @@ export function MobileDetailsStep({
       name="fee"
       render={({ field }) => (
         <FormItem>
-          <FormLabel className="text-base font-medium">
+          <FormLabel className="text-base leading-none font-medium">
             {t("activity:mobile_fee_optional")}
           </FormLabel>
           <FormControl>
@@ -574,7 +582,7 @@ export function MobileDetailsStep({
       name="tax"
       render={({ field }) => (
         <FormItem>
-          <FormLabel className="text-base font-medium">
+          <FormLabel className="text-base leading-none font-medium">
             {isIncomeActivity
               ? t("activity:mobile_form.withholding_tax_optional")
               : t("activity:mobile_form.tax_optional")}
@@ -695,7 +703,7 @@ export function MobileDetailsStep({
               name="accountId"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel className="text-base font-medium">
+                  <FormLabel className="text-base leading-none font-medium">
                     {isTransfer && isExternal
                       ? direction === "in"
                         ? t("activity:form.label_to_account")
@@ -706,10 +714,10 @@ export function MobileDetailsStep({
                   </FormLabel>
                   <FormControl>
                     <Button
-                      variant="outline"
+                      variant="field"
                       role="combobox"
                       size="lg"
-                      className="w-full justify-between rounded-md font-normal"
+                      className="w-full justify-between"
                       onClick={() => setAccountSheetOpen(true)}
                       type="button"
                     >
@@ -736,15 +744,15 @@ export function MobileDetailsStep({
                     : t("activity:mobile_form.select_destination_account");
                   return (
                     <FormItem>
-                      <FormLabel className="text-base font-medium">
+                      <FormLabel className="text-base leading-none font-medium">
                         {t("activity:form.label_to_account")}
                       </FormLabel>
                       <FormControl>
                         <Button
-                          variant="outline"
+                          variant="field"
                           role="combobox"
                           size="lg"
-                          className="w-full justify-between rounded-md font-normal"
+                          className="w-full justify-between"
                           onClick={() => setToAccountSheetOpen(true)}
                           type="button"
                         >
@@ -769,7 +777,7 @@ export function MobileDetailsStep({
               name="activityDate"
               render={({ field }) => (
                 <FormItem className="flex flex-col">
-                  <FormLabel className="text-base font-medium">
+                  <FormLabel className="text-base leading-none font-medium">
                     {t("activity:mobile_date_time")}
                   </FormLabel>
                   <DatePickerInput
@@ -843,7 +851,9 @@ export function MobileDetailsStep({
                       name="quantity"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel className="text-base font-medium">{quantityLabel}</FormLabel>
+                          <FormLabel className="text-base leading-none font-medium">
+                            {quantityLabel}
+                          </FormLabel>
                           <FormControl>
                             <QuantityInput {...field} />
                           </FormControl>
@@ -860,7 +870,9 @@ export function MobileDetailsStep({
                             {isFmvPriceLabel ? (
                               <FmvPerUnitLabel />
                             ) : (
-                              <FormLabel className="text-base font-medium">{priceLabel}</FormLabel>
+                              <FormLabel className="text-base leading-none font-medium">
+                                {priceLabel}
+                              </FormLabel>
                             )}
                             <FormControl>
                               <MoneyInput {...field} />
@@ -886,7 +898,7 @@ export function MobileDetailsStep({
                         inputMode="decimal"
                         {...register("contractMultiplier" as any, { valueAsNumber: true })}
                         readOnly={isEditing}
-                        className="hover:border-input focus:border-input focus:bg-background focus:ring-ring h-5 w-14 rounded border border-transparent bg-transparent px-1 text-center text-xs tabular-nums focus:outline-none focus:ring-1"
+                        className="hover:border-input focus:border-input focus:bg-background focus:ring-ring h-5 w-14 rounded border border-transparent bg-transparent px-1 text-center text-xs tabular-nums focus:ring-1 focus:outline-none"
                         aria-label={t("activity:form.contract_multiplier")}
                       />
                       <span>x</span>
@@ -900,7 +912,7 @@ export function MobileDetailsStep({
                 <div className="bg-muted/50 border-border rounded-lg border p-3">
                   <div className="flex items-center justify-between">
                     <div className="min-w-0 flex-1">
-                      <span className="text-muted-foreground text-xs font-medium uppercase tracking-wide">
+                      <span className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
                         {isTradeDebit
                           ? t("activity:form.total_debit")
                           : t("activity:form.total_credit")}
@@ -936,7 +948,7 @@ export function MobileDetailsStep({
                   name="amount"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel className="text-base font-medium">
+                      <FormLabel className="text-base leading-none font-medium">
                         {activityType === ActivityType.DIVIDEND
                           ? t("activity:field_dividend_amount")
                           : activityType === ActivityType.INTEREST
@@ -988,7 +1000,7 @@ export function MobileDetailsStep({
                         name={"sourceAmount" as any}
                         render={({ field }) => (
                           <FormItem>
-                            <FormLabel className="text-base font-medium">
+                            <FormLabel className="text-base leading-none font-medium">
                               {t("activity:form.label_sent", {
                                 currency: effectiveSourceCurrency,
                               })}
@@ -1009,7 +1021,7 @@ export function MobileDetailsStep({
                         name={"destinationAmount" as any}
                         render={({ field }) => (
                           <FormItem>
-                            <FormLabel className="text-base font-medium">
+                            <FormLabel className="text-base leading-none font-medium">
                               {t("activity:form.label_received", {
                                 currency: effectiveDestinationCurrency,
                               })}
@@ -1032,7 +1044,7 @@ export function MobileDetailsStep({
                       name={"sourceAmount" as any}
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel className="text-base font-medium">
+                          <FormLabel className="text-base leading-none font-medium">
                             {t("activity:form.label_amount")} ({effectiveSourceCurrency})
                           </FormLabel>
                           <FormControl>
@@ -1054,7 +1066,7 @@ export function MobileDetailsStep({
                       name={"transferRate" as any}
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel className="text-base font-medium">
+                          <FormLabel className="text-base leading-none font-medium">
                             {t("activity:form.label_transfer_rate")}
                             <span className="text-muted-foreground ms-2 text-xs font-normal">
                               1 {effectiveSourceCurrency} ={" "}
@@ -1085,7 +1097,7 @@ export function MobileDetailsStep({
                   name="amount"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel className="text-base font-medium">
+                      <FormLabel className="text-base leading-none font-medium">
                         {t("activity:form.label_split_ratio")}
                       </FormLabel>
                       <FormControl>
@@ -1118,7 +1130,7 @@ export function MobileDetailsStep({
                   name="fee"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel className="text-base font-medium">
+                      <FormLabel className="text-base leading-none font-medium">
                         {t("activity:field_fee_amount")}
                       </FormLabel>
                       <FormControl>
@@ -1157,7 +1169,7 @@ export function MobileDetailsStep({
               name="comment"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel className="text-base font-medium">
+                  <FormLabel className="text-base leading-none font-medium">
                     {t("activity:mobile_description_optional")}
                   </FormLabel>
                   <FormControl>
@@ -1218,7 +1230,7 @@ function MobileAccountSheet({ accounts, open, onOpenChange, onSelect }: MobileAc
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="bottom" className="rounded-t-4xl mx-1 h-[70vh] p-0">
+      <SheetContent side="bottom" className="mx-1 h-[70vh] rounded-t-4xl p-0">
         <SheetHeader className="border-border border-b px-6 py-4">
           <SheetTitle>{t("activity:select_account")}</SheetTitle>
           <SheetDescription>{t("activity:mobile_choose_account")}</SheetDescription>

@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { cn } from "../../lib/utils";
 import { Icons } from "../ui/icons";
 import { InputGroupAddon } from "../ui/input-group";
@@ -30,6 +31,9 @@ interface SearchableSelectProps {
   emptyMessage?: string;
   className?: string;
   contentClassName?: string;
+  "data-testid"?: string;
+  /** Names the trigger when no visible label is tied to it. */
+  "aria-label"?: string;
 }
 
 // A select-style field whose list has a search box: shadcn's Combobox with the
@@ -38,13 +42,16 @@ export function SearchableSelect({
   options = [],
   value,
   onValueChange,
-  placeholder = "Select an option",
+  placeholder,
   disabled = false,
-  searchPlaceholder = "Search...",
-  emptyMessage = "No results found.",
+  searchPlaceholder,
+  emptyMessage,
   className = "",
   contentClassName = "",
+  "data-testid": testId,
+  "aria-label": ariaLabel,
 }: SearchableSelectProps) {
+  const { t } = useTranslation();
   const selectedOption = options.find((option) => option.value === value) ?? null;
 
   return (
@@ -61,24 +68,30 @@ export function SearchableSelect({
       <ComboboxTrigger
         render={
           <Button
-            variant="outline"
-            className={cn("w-full justify-between rounded-md font-normal", className)}
+            variant="field"
+            className={cn("w-full justify-between", className)}
             disabled={disabled}
+            data-testid={testId}
+            aria-label={ariaLabel}
           />
         }
       >
         <span className={cn("truncate", !selectedOption && "text-muted-foreground")}>
-          <ComboboxValue placeholder={placeholder} />
+          <ComboboxValue placeholder={placeholder ?? t("ui:select.placeholder", "Select an option")} />
         </span>
       </ComboboxTrigger>
       <ComboboxContent className={cn("w-(--anchor-width)", contentClassName)}>
-        <ComboboxInput showTrigger={false} placeholder={searchPlaceholder} className="w-full">
+        <ComboboxInput
+          showTrigger={false}
+          placeholder={searchPlaceholder ?? t("common:search_placeholder", "Search...")}
+          className="w-full"
+        >
           <InputGroupAddon>
             <Icons.Search className="opacity-50" />
           </InputGroupAddon>
         </ComboboxInput>
         <ComboboxSeparator className="mx-0 my-0" />
-        <ComboboxEmpty>{emptyMessage}</ComboboxEmpty>
+        <ComboboxEmpty>{emptyMessage ?? t("common:no_results_found", "No results found.")}</ComboboxEmpty>
         <ComboboxList>
           {(option: Option) => (
             <ComboboxItem key={option.value} value={option} className={option.className}>

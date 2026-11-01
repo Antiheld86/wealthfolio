@@ -26,6 +26,7 @@ import React, { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { Alert, AlertDescription, AlertTitle } from "@wealthfolio/ui/components/ui/alert";
+import { cardSurfaceClassName } from "@wealthfolio/ui/components/ui/card";
 import { statusSurfaceVariants } from "@wealthfolio/ui/components/ui/status-surface";
 import { cn } from "@/lib/utils";
 
@@ -179,7 +180,12 @@ const AccountSummaryComponent = React.memo(
       }
 
       return (
-        <div className="border-border/40 bg-card/90 shadow-xs flex w-full items-center justify-between gap-3 rounded-xl border px-4 py-3 md:px-5 md:py-4">
+        <div
+          className={cn(
+            cardSurfaceClassName,
+            "flex w-full items-center justify-between gap-3 px-4 py-3 md:px-5 md:py-4",
+          )}
+        >
           {skeletonContent}
         </div>
       );
@@ -260,7 +266,7 @@ const AccountSummaryComponent = React.memo(
           {gainAmountToDisplay != null && (
             <>
               <GainAmount
-                className="text-xs font-medium md:text-sm md:font-medium"
+                className="text-xs md:text-sm"
                 value={gainAmountToDisplay}
                 currency={gainDisplayCurrency}
                 displayCurrency={false}
@@ -268,10 +274,7 @@ const AccountSummaryComponent = React.memo(
               <Separator orientation="vertical" className="h-3 md:h-4" />
             </>
           )}
-          <GainPercent
-            className="text-xs font-medium md:text-sm md:font-medium"
-            value={gainPercentToDisplay}
-          />
+          <GainPercent className="text-xs md:text-sm" value={gainPercentToDisplay} />
         </>
       );
       shouldExposeSecondaryMetric = true;
@@ -282,7 +285,7 @@ const AccountSummaryComponent = React.memo(
     const content = (
       <>
         <div className="flex min-w-0 flex-1 flex-col gap-1 md:gap-1.5">
-          <h3 className="flex items-center gap-1.5 text-sm font-semibold leading-tight md:text-base md:font-semibold">
+          <h3 className="flex items-center gap-1.5 text-sm leading-tight font-semibold md:text-base md:font-semibold">
             <span className="truncate">{name}</span>
             {shouldShowWarning && (
               <Tooltip>
@@ -305,7 +308,7 @@ const AccountSummaryComponent = React.memo(
         </div>
         <div className="flex shrink-0 items-center gap-2 md:gap-3">
           <div className="flex min-h-[3rem] flex-col items-end justify-center gap-1 md:gap-1.5">
-            <p className="text-sm font-semibold leading-tight md:text-base md:font-semibold">
+            <p className="text-sm leading-tight font-semibold md:text-base md:font-semibold">
               <PrivacyAmount value={totalValue} currency={currency} />
             </p>
             {secondaryMetricContent && (
@@ -364,7 +367,10 @@ const AccountSummaryComponent = React.memo(
       return (
         <Link
           to={`/accounts/${accountId}`}
-          className="border-border/40 bg-card/90 shadow-xs flex w-full cursor-pointer items-center justify-between gap-3 rounded-xl border px-4 py-3 transition-all duration-150 hover:shadow-md md:px-5 md:py-4"
+          className={cn(
+            cardSurfaceClassName,
+            "flex w-full cursor-pointer items-center justify-between gap-3 px-4 py-3 transition-all duration-150 hover:shadow-md md:px-5 md:py-4",
+          )}
         >
           {content}
         </Link>
@@ -372,7 +378,12 @@ const AccountSummaryComponent = React.memo(
     }
 
     return (
-      <div className="border-border/40 bg-card/90 shadow-xs flex w-full items-center justify-between gap-3 rounded-xl border px-4 py-3 md:px-5 md:py-4">
+      <div
+        className={cn(
+          cardSurfaceClassName,
+          "flex w-full items-center justify-between gap-3 px-4 py-3 md:px-5 md:py-4",
+        )}
+      >
         {content}
       </div>
     );
@@ -534,7 +545,7 @@ export const AccountsSummary = React.memo(
         return Array.from({ length: 4 }).map((_, index) => (
           <div
             key={`skeleton-${index}`}
-            className="border-border/40 bg-card/90 shadow-xs rounded-xl border px-4 py-3 md:px-5 md:py-4"
+            className={cn(cardSurfaceClassName, "px-4 py-3 md:px-5 md:py-4")}
           >
             <AccountSummarySkeleton />
           </div>
@@ -546,7 +557,7 @@ export const AccountsSummary = React.memo(
           <Alert variant="destructive" className="rounded-xl p-4 md:p-5">
             <Icons.AlertTriangle />
             <AlertTitle>{t("dashboard:summary.failed_to_load")}</AlertTitle>
-            <AlertDescription className="break-words text-xs">
+            <AlertDescription className="text-xs break-words">
               <p className="mb-2">
                 {errorAccounts?.message || t("dashboard:summary.unexpected_error")}
               </p>
@@ -665,7 +676,10 @@ export const AccountsSummary = React.memo(
               return (
                 <div
                   key={group.accountName}
-                  className="border-border/40 bg-card/90 shadow-xs overflow-hidden rounded-xl border transition-shadow duration-150 hover:shadow-md"
+                  className={cn(
+                    cardSurfaceClassName,
+                    "overflow-hidden transition-shadow duration-150 hover:shadow-md",
+                  )}
                 >
                   <div className="cursor-pointer">
                     <AccountSummaryComponent
@@ -768,7 +782,7 @@ export const AccountsSummary = React.memo(
           <Alert variant="destructive" className="mb-2 p-3">
             <Icons.AlertTriangle />
             <AlertTitle>{t("dashboard:summary.failed_to_load_performance")}</AlertTitle>
-            <AlertDescription className="break-words text-xs">
+            <AlertDescription className="text-xs break-words">
               {performanceError?.message || t("dashboard:summary.values_without_returns")}
             </AlertDescription>
           </Alert>

@@ -564,7 +564,7 @@ export function ValueHistoryDataGrid({
                 return (
                   <div key={draft.id} className="bg-background w-full space-y-3 p-3">
                     <div>
-                      <span className="text-xs font-medium uppercase tracking-wide">
+                      <span className="text-xs font-medium tracking-wide uppercase">
                         {draft.isNew
                           ? isLiability
                             ? t("asset:valueToolbar.add_balance")
@@ -763,7 +763,7 @@ export function ValueHistoryDataGrid({
         isLiability={isLiability}
       />
 
-      <div className="min-h-0 flex-1 overflow-hidden rounded-md border">
+      <div className="min-h-0 flex-1">
         <DataGrid {...dataGrid} stretchColumns height="calc(100vh - 340px)" />
       </div>
     </div>

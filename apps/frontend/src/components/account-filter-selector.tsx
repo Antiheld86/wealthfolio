@@ -86,15 +86,17 @@ const SelectorTrigger = forwardRef<HTMLButtonElement, SelectorTriggerProps>(
     return (
       <Button
         ref={ref}
-        variant="outline"
+        variant={compact ? "secondary" : "outline"}
         role="combobox"
         aria-expanded={open}
         className={cn(
           "flex items-center gap-2 font-medium",
           triggerVariant === "input"
             ? "bg-background/70 text-foreground hover:bg-background/70 focus-visible:border-foreground w-full justify-between rounded-lg border px-3 py-2.5 text-sm font-semibold shadow-none"
-            : "bg-secondary/30 hover:bg-muted/80 rounded-full border-none",
-          triggerVariant === "icon" && "bg-secondary/50 h-8 w-8 justify-center rounded-full p-0",
+            : compact
+              ? "rounded-full"
+              : "bg-secondary/30 hover:bg-muted/80 rounded-full border-none",
+          triggerVariant === "icon" && "h-8 w-8 justify-center p-0",
           triggerVariant === "default" &&
             (isMobile
               ? "h-9 w-9 justify-center p-0"
@@ -346,7 +348,7 @@ export function AccountScopeSelector({
             "mx-1 p-0",
             portfoliosOnly ? "bg-card max-h-[80dvh] rounded-t-2xl" : "rounded-t-4xl h-[80vh]",
           )}
-          style={portfoliosOnly ? { paddingBottom: "env(safe-area-inset-bottom, 0px)" } : undefined}
+          style={portfoliosOnly ? { paddingBottom: "var(--inset-bottom)" } : undefined}
         >
           <SheetHeader className="border-border border-b px-6 py-4">
             <SheetTitle ref={sheetTitleRef} tabIndex={portfoliosOnly ? -1 : undefined}>
@@ -369,7 +371,7 @@ export function AccountScopeSelector({
               "rounded-none",
               portfoliosOnly && "bg-card [&_[data-cmdk-input-wrapper]]:px-6",
               portfoliosOnly
-                ? "h-auto max-h-[calc(80dvh-5rem-env(safe-area-inset-bottom,0px))]"
+                ? "h-auto max-h-[calc(80dvh-5rem-var(--inset-bottom))]"
                 : "h-[calc(80vh-4.5rem)]",
             )}
             listClassName="min-h-0 max-h-none flex-1 px-2 py-2"

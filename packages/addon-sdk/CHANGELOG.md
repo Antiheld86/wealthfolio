@@ -4,36 +4,154 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.12.0] - 2026-11-01
 
 ### Added
 
-- `NetworkRequest.timeoutSecs` for longer-running addon HTTP requests. Defaults
-  to 10 seconds; positive integer values are capped server-side at 120 seconds.
+- `ActivityImport.sourceGroupId` and `ACTIVITY_SUBTYPES.CONVERSION_OUT` /
+  `CONVERSION_IN`: an import records an in-kind conversion (a fund switch
+  carried at cost) as two ADJUSTMENT rows, one of each subtype, sharing a
+  `sourceGroupId`. Both rows go in the same import; a conversion row without its
+  other row fails the import. Other rows ignore `sourceGroupId`.
 
-- Optional `ActivityImport.isExternal` boundary override for transfer and credit
-  imports.
-- `ExchangeRatesAPI.getRatesForDates(pairs)` for batched date-specific FX-rate
-  lookups, with per-pair errors and Wealthfolio's standard FX resolution rules.
-- `ctx.api.spending` (`SpendingAPI`) — `isEnabled()`, `getCategories()`,
-  `getRules()`, `saveRule()`, `deleteRule()`, `rerunRules()`, letting addons
-  classify activities into the user's existing spend-category taxonomy via
-  Wealthfolio's categorization-rules engine. Requires a Wealthfolio release that
-  ships this bridge (unreleased at the time of writing). See the
-  [Spend Categorization API reference](../../docs/addons/addon-api-reference.md#spend-categorization-api).
-- `SpendingAPI.getReport()` and `SpendingAPI.searchCashActivities()` for
-  read-only aggregate reports and categorized transaction searches. Transaction
-  search requires the high-risk `activities.searchCashActivities` permission.
-  Reports include `baseCurrency` to identify the currency of all monetary
-  amounts.
-- `registerTranslations()` and `useAddonTranslation()` for translating addon UI
-  strings. Resources live on a dedicated i18next instance inside the addon
-  sandbox, isolated from the host catalog; the language follows the host
-  setting. Requires a Wealthfolio release that ships this sandbox runtime
-  (unreleased at the time of writing). See the
-  [Addon Localization guide](../../docs/addons/addon-localization.md).
-- Optional `status` and `needsReview` fields on `ActivityCreate` and
-  `ActivityUpdate`.
+- `Settings.themeId`: the host's theme (Classic, Signature, Ember, Cupertino,
+  Newspaper, Cyber, Terminal or Poster), absent on hosts without themes. Addon
+  pages get the theme's colours through the host's CSS variables and its
+  `data-theme` attribute on `<html>`, and follow it when the user switches.
+- `Settings.textSize`: the host's text size on this device (`small`, `default`,
+  `large` or `extra-large`), absent on hosts without it. It scales the root font
+  size, so everything an addon sizes in `rem` grows with the host's text; addon
+  pages get it as the `data-text-size` attribute on `<html>` and follow it when
+  the user changes it. Sizes in `px` stay as they are.
+- `chartSliceColor(index)` in `@wealthfolio/ui`: the colour for the item at a
+  position in a composition, the theme's first seven chart colours and then the
+  same seven mixed halfway toward the card. The host's donuts, breakdown lists
+  and allocation strips use it, so an addon chart that does matches them.
+- Chart colours as theme tokens: `--series-1` to `--series-8` for lines and
+  markers compared on one axis (each reaches 3:1 on the page and on cards),
+  `--investments` (the portfolio value line at or above zero), `--net-worth`,
+  and `--spending-accent`, `--spending-deep` and `--spending-mid`. The treemap
+  ramps gain `--heatmap-positive-mid` and `--heatmap-negative-mid`.
+- `Settings.gainColors`: the user's gain and loss colours, `green-up` (the
+  default), `red-up` or `red-up-blue-down`, synced across their devices; absent
+  on older hosts. The host sets it on `<html>` as `data-gain-colors`, and addon
+  pages get the same attribute.
+- Gain and loss tokens that follow that setting: `--gain` and `--loss`, each
+  with `-subtle`, `-subtle-foreground` and `-subtle-border`, and the treemap's
+  `--heatmap-gain-*` and `--heatmap-loss-*` (`-low`, `-mid`, `-high`). Use them,
+  not `--success` and `--destructive`, for a price or value going up or down.
+  `--loss-blue` and its subtle surface are the true blue that losses take with
+  `red-up-blue-down`, and `--heatmap-blue-*` its treemap ramp.
+- Eight `spending` functions, each behind its own grant:
+  - `getContext()`: whether Spending is on, its accounts and its excluded
+    categories (`spending.getContext`). It never enrolls an account.
+  - `getBudget(periodKey?)`: the budget for a `YYYY-MM` month (the current one
+    when omitted), or for the default targets with `"default"`
+    (`spending.getBudget`).
+  - `getEvents()` and `getEventTypes()`: the stored events and the event types
+    (`spending.getEvents`, `spending.getEventTypes`).
+  - `assignCategory(activityId, kind, categoryId)` and
+    `unassignCategory(activityId, kind)`: set or clear a transaction's category
+    as a manual choice (`activities.assignCategory`,
+    `activities.unassignCategory`, high risk). Assigning fails on a split
+    transaction; clearing leaves its splits as they are.
+  - `setEvent(activityId, eventId)`: tag a transaction with an event, or pass
+    `null` to untag it (`activities.setEvent`, high risk).
+  - `upsertBudgetTarget(target, periodKey?)`: save a default target
+    (`target.periodKey` `"default"`) or a month's override, and get back the
+    budget for `periodKey` (`budgets.upsertBudgetTarget`, high risk, in the new
+    Budget Management category). A default target applies to every month that
+    inherits it, past months included; a month's override wins.
+- `SpendingPeriodSummary.fromSavings`: money brought back from savings in the
+  period, so `net = income - outflow - saved + fromSavings`. Absent on older
+  hosts.
+- `@wealthfolio/ui`: `SwipableView` takes `onSelectView`, called on release as
+  soon as a swipe picks a view, while the slide still moves (keep it light, a
+  highlight), and `onSwipeStart`, called once per drag when the slide first
+  moves. `DateRangeSelector` takes `allTimeFrom`, the earliest date the ALL
+  preset stands for: the calendar shows and opens on it, while the ALL value
+  keeps its sentinel start. Data grid `select` cells take `isDisabled(rowData)`,
+  like `checkbox` cells.
+
+### Changed
+
+- `SwipableView` calls `onViewChange` when a swipe lands on its view, not when
+  it is released. A `selectedIndex` naming a view whose slide isn't there yet is
+  reached once the slide mounts, instead of the slide it stopped on being
+  reported as a swipe.
+- `goals.getFunding()` returns Retirement's share of an account as the user set
+  it, not what Retirement counts. Retirement's share is now an upper limit:
+  savings goals take their shares first and Retirement counts at most what they
+  leave, so the shares on one account can add up to more than 100%.
+- `goals.update()` saves only a goal's editable inputs. Health, progress and
+  projection fields are calculated by the host, and values sent for them are
+  ignored.
+- `GainAmount`, `GainPercent` and `AmountDisplay` (with `colorFormat`) draw with
+  the gain and loss tokens, so they follow the user's gain and loss colours;
+  with the default they look as before.
+- The component theme tokens (`--button-*`, `--control-*`, `--field-*`,
+  `--switch-*`, `--card-*`, `--popup-*`, `--overlay-*`, `--dialog-radius`,
+  `--sheet-bg`, `--badge-radius`, `--segmented-*`) follow the host's theme;
+  Classic keeps the previous look. `Tabs`' sliding thumb reads
+  `--segmented-thumb`, `--segmented-thumb-image` and `--segmented-thumb-shadow`,
+  and the default `Button` takes its border colour from `--button-border`
+  (transparent in Classic).
+- `DonutChart` gives slices past the seventh the first seven colours again,
+  mixed halfway toward the card, instead of repeating them at full strength, and
+  draws each slice with a 1 px edge in its colour, 15% toward the text colour.
+- Classic's chart colours (`--chart-1` to `--chart-9`) are Flexoki's hues,
+  softened: teal, olive, ochre and clay lead, slate, lavender and rose follow,
+  then two greys. Its treemap ramps (`--heatmap-*`) are soft sage and rose in
+  light mode and Flexoki green and red (50, 200 and 400) in dark. Addon charts
+  that read them change colour in Classic.
+- `spending.searchCashActivities()` returns split amounts as exact decimal
+  strings, preserving replacement evidence without floating-point rounding.
+  Wealthfolio 3.11.0 returned numbers. The existing `string | number` SDK type
+  accepts both; JavaScript consumers must use explicit decimal arithmetic for
+  totals instead of adding raw values with `+`.
+- `activities.getTransferPair()` also returns a conversion's two rows:
+  `transferOut` is the CONVERSION_OUT row and `transferIn` the CONVERSION_IN
+  row. Code that expects a transfer should check `activityType`.
+- Activity updates sent through the addon bridge are projected onto the public
+  SDK fields (including the legacy `notes` alias). Native-only controls such as
+  `unlinkTransferPairId` are not forwarded by `update` or `saveMany`;
+  `activities.unlinkTransfer` retains its separate function grant.
+
+### Fixed
+
+- The package root exports the data types' runtime values, not only their types:
+  `ActivityType`, `ACTIVITY_TYPES`, `ActivityStatus`, `ACTIVITY_SUBTYPES`,
+  `AssetKind`, `QuoteMode`, `DataSource`, `AccountType`, `HoldingType`,
+  `ACTIVITY_TYPE_PREFIX_LENGTH`, `getEffectiveType` and `hasUserOverride`.
+  Before, they were exported as types only, so code such as
+  `ACTIVITY_SUBTYPES.CONVERSION_OUT` failed to compile (TS1362, "cannot be used
+  as a value because it was exported using 'export type'"). The host supplies
+  the SDK at run time, so add-ons that use these values must set
+  `minWealthfolioVersion` to `3.12.0` or newer.
+
+## [3.11.0] - 2026-10-22
+
+### Added
+
+- Theme tokens for components: `Button`, `Input`, `Textarea`, `Select`,
+  `Toggle`, `Switch`, `Card`, `CardTitle`, `Badge`, `Dialog`, `AlertDialog`,
+  `Sheet`, the popups (select, menu, popover, hover card, command, combobox) and
+  `AnimatedToggleGroup` read their corners, field height, surfaces, borders and
+  shadows from CSS variables (`--button-*`, `--control-*`, `--field-*`,
+  `--switch-*`, `--card-*`, `--popup-*`, `--overlay-*`, `--dialog-radius`,
+  `--sheet-bg`, `--badge-radius`, `--segmented-*`). The host's Classic theme
+  sets them to the previous look. Classes an addon passes still win, in dark
+  mode too: an outline `Button`'s own background or border is no longer replaced
+  by the variant's dark colours. `Button` also sets `data-variant` and
+  `data-size`, as shadcn's does.
+- `AnimatedToggleGroup` items take an optional `aria-label`, for options whose
+  visible label needs more context.
+- `Button` variant `field`, for a button that opens a picker in a form: it takes
+  `SelectTrigger`'s surface, border, radius, label weight and hover, so a picker
+  matches the selects beside it.
+- `cardSurfaceClassName`, exported with `Card`: the card's surface, border,
+  radius and shadow as classes, for an element that must stay something else (a
+  link, say) but look like a card.
 - `IncomeSummary.unconvertedCurrencies`, the currencies whose income has no
   exchange rate to the summary's currency. Requires a Wealthfolio release that
   ships it (unreleased at the time of writing).
@@ -195,6 +313,11 @@ and this project adheres to
 - `PopoverContent` is at most as tall as the space beside its trigger
   (`--available-height`) and scrolls beyond it, as menus and select lists do, so
   a tall popover no longer runs off the screen.
+- `DataTable` and `DataGrid` are drawn on a `Card` (its surface, border, radius
+  and shadow). Their sticky header, footer and pinned cells paint the card
+  surface, and the table's header row loses its muted tint. Pass `card={false}`
+  to `DataTable` for a table already inside a card or dialog to keep the
+  previous bordered frame.
 - `Spinner`, shadcn's spinner on the Loader2 icon. It is decorative
   (`aria-hidden`) unless you pass a translated `aria-label`, which makes it a
   `status`. `ProgressIndicator` uses it and is now built on `DialogContent` (no
@@ -213,13 +336,15 @@ and this project adheres to
 - **Breaking:** `Autocomplete` is removed; use `Combobox`.
 - In dark mode `--success-subtle-foreground` is green-200, the step the other
   status text colours use, so success text reads green rather than near-white.
-- `ActivityUpdate.asset` now has explicit patch semantics: omit it to preserve
-  the current asset, or pass an empty object to clear the asset association.
-- Host-provided `@wealthfolio/addon-sdk` and `@wealthfolio/ui` dependency ranges
-  are now `^3.8.0`.
 - `IncomeSummary` totals and breakdowns leave out income that has no exchange
   rate to the summary's currency, instead of counting it as if it were already
   in that currency. `byCurrency` still includes it.
+- `IncomeSummary.yoyGrowth` is `null` for `YTD` and `LAST_YEAR` when the year
+  before has no income to compare with, instead of `0`.
+- `DateRangeSelector` and `IntervalSelector` carry `data-no-swipe-drag`, so on a
+  page that switches views with a horizontal swipe, a sideways drag on them
+  scrolls their presets instead. On phones `DateRangeSelector` uses the
+  `compact` size, as `IntervalSelector` does.
 
 ### Deprecated
 
@@ -232,6 +357,48 @@ The app does not use them; they are removed in the next major SDK version.
   its event keeps the menu open, as with Radix.
 - `ToggleGroup` `type`: `type="single"` takes and returns a string (`""` when
   nothing is pressed) and `type="multiple"` maps to `multiple`.
+
+## [3.9.0] - 2026-09-27
+
+### Added
+
+- `NetworkRequest.timeoutSecs` for longer-running addon HTTP requests. Defaults
+  to 10 seconds; positive integer values are capped server-side at 120 seconds.
+- `SpendingAPI.getReport()` and `SpendingAPI.searchCashActivities()` for
+  read-only aggregate reports and categorized transaction searches. Transaction
+  search requires the high-risk `activities.searchCashActivities` permission.
+  Reports include `baseCurrency` to identify the currency of all monetary
+  amounts.
+
+## [3.8.0] - 2026-09-07
+
+### Added
+
+- Optional `ActivityImport.isExternal` boundary override for transfer and credit
+  imports.
+- `ExchangeRatesAPI.getRatesForDates(pairs)` for batched date-specific FX-rate
+  lookups, with per-pair errors and Wealthfolio's standard FX resolution rules.
+- `ctx.api.spending` (`SpendingAPI`) — `isEnabled()`, `getCategories()`,
+  `getRules()`, `saveRule()`, `deleteRule()`, `rerunRules()`, letting addons
+  classify activities into the user's existing spend-category taxonomy via
+  Wealthfolio's categorization-rules engine. Requires a Wealthfolio release that
+  ships this bridge (unreleased at the time of writing). See the
+  [Spend Categorization API reference](../../docs/addons/addon-api-reference.md#spend-categorization-api).
+- `registerTranslations()` and `useAddonTranslation()` for translating addon UI
+  strings. Resources live on a dedicated i18next instance inside the addon
+  sandbox, isolated from the host catalog; the language follows the host
+  setting. Requires a Wealthfolio release that ships this sandbox runtime
+  (unreleased at the time of writing). See the
+  [Addon Localization guide](../../docs/addons/addon-localization.md).
+- Optional `status` and `needsReview` fields on `ActivityCreate` and
+  `ActivityUpdate`.
+
+### Changed
+
+- `ActivityUpdate.asset` now has explicit patch semantics: omit it to preserve
+  the current asset, or pass an empty object to clear the asset association.
+- Host-provided `@wealthfolio/addon-sdk` and `@wealthfolio/ui` dependency ranges
+  are now `^3.8.0`.
 
 ## [3.7.0] - 2026-08-10
 

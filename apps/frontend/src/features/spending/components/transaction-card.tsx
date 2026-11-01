@@ -1,3 +1,4 @@
+import { getCategoryLabel } from "@/lib/taxonomy-labels";
 import { memo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -15,9 +16,15 @@ import {
 } from "../lib/transactions-helpers";
 import { ActionPalette } from "@/components/action-palette";
 
+import { CategoryIcon } from "./category-chips";
 import { QuickCategorizePopover } from "./quick-categorize-popover";
 import { SelectionCheckbox } from "./selection-checkbox";
 import { QuickEventPopover } from "./quick-event-popover";
+import {
+  NEEDS_REVIEW_CARD_CLASS,
+  NeedsReviewMark,
+  NeedsReviewStripe,
+} from "@/components/needs-review";
 
 interface TransactionCardProps {
   row: TransactionRowVM;
@@ -104,16 +111,11 @@ function TransactionCardImpl({
   return (
     <Card
       data-state={isSelected ? "selected" : undefined}
-      className={cn(
-        "relative overflow-hidden p-2.5",
-        row.needsReview && "border-warning/40 bg-warning/5",
-      )}
+      className={cn("relative overflow-hidden p-2.5", row.needsReview && NEEDS_REVIEW_CARD_CLASS)}
     >
       {/* Same leading marker the table row uses, so review state costs no width
           in the name and no height in the card. */}
-      {row.needsReview && (
-        <span className="bg-warning absolute inset-y-0 start-0 w-[3px]" aria-hidden="true" />
-      )}
+      {row.needsReview && <NeedsReviewStripe />}
       {/* Centred rather than top-aligned: on a two-line card the selection
           control and the row menu read as belonging to the whole row, which is
           also how the investment activity card places them. */}
@@ -133,12 +135,7 @@ function TransactionCardImpl({
             {/* See the table row: the amber stripe is decorative, so the state
                 needs a form that survives both a screen reader and a reader who
                 cannot separate the colours. */}
-            {row.needsReview && (
-              <span className="text-warning shrink-0">
-                <Icons.AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
-                <span className="sr-only">{t("spending:transactions.review")}</span>
-              </span>
-            )}
+            {row.needsReview && <NeedsReviewMark label={t("spending:transactions.review")} />}
             <span className="text-foreground min-w-0 flex-1 truncate text-sm font-medium">
               {a.notes ?? <span className="text-muted-foreground italic">—</span>}
             </span>
@@ -165,7 +162,7 @@ function TransactionCardImpl({
           <div className="text-muted-foreground text-2xs mt-0.5 flex items-center gap-1.5">
             <span className="shrink-0">{time}</span>
             <span aria-hidden="true">·</span>
-            {isNeutral ? (
+            {isNeutral && row.splitCount === 0 ? (
               <span className="shrink-0">{t("spending:transactions.neutral")}</span>
             ) : row.splitCount > 0 ? (
               <button type="button" className={INLINE} onClick={() => onEditSplits(row)}>
@@ -187,21 +184,37 @@ function TransactionCardImpl({
                     type="button"
                     aria-label={
                       row.category
-                        ? t("spending:transactions.changeCategory", { name: row.category.name })
+                        ? t("spending:transactions.changeCategory", {
+                            name: getCategoryLabel(
+                              t,
+                              row.category.taxonomyId,
+                              row.category.id,
+                              row.category.name,
+                            ),
+                          })
                         : t("spending:transactions.assignCategory")
                     }
                     className={cn(INLINE, "max-w-[55%]")}
                   >
                     {row.category ? (
                       <>
-                        {row.category.color && (
-                          <span
-                            className="h-2 w-2 shrink-0 rounded-full"
-                            style={{ backgroundColor: row.category.color }}
-                            aria-hidden="true"
-                          />
-                        )}
-                        <span className="truncate">{row.category.name}</span>
+                        {/* A tile is too small to read at this size; the bare icon
+                            fits the 16px meta line like the split icon does. */}
+                        <span
+                          className="shrink-0"
+                          style={{ color: row.category.color ?? undefined }}
+                          aria-hidden="true"
+                        >
+                          <CategoryIcon icon={row.category.icon} className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="truncate">
+                          {getCategoryLabel(
+                            t,
+                            row.category.taxonomyId,
+                            row.category.id,
+                            row.category.name,
+                          )}
+                        </span>
                       </>
                     ) : (
                       <span className="inline-flex min-w-0 items-center gap-0.5 italic">

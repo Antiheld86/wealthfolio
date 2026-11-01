@@ -3,8 +3,8 @@
 //! return, attribution, risk, holdings-mode and mixed-scope handling).
 //!
 //! Rows are read as storage keeps them (8 decimal places); windows select
-//! rows by date, and dated attribution counts events strictly after the
-//! window start.
+//! rows by date. Transaction windows covering inception include the opening
+//! day's attribution; later windows count from their first stored day's close.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -28,9 +28,22 @@ const RESIDUAL_TOLERANCE_RATE: Decimal = dec!(0.002);
 /// stored. Measuring reads no raw facts and resolves no rates.
 pub struct MeasureInputs<'a> {
     pub effects: Effects,
+    /// Prepared daily cash FX by account. None means preparation was skipped
+    /// for Dashboard; Some with empty daily entries means known zero FX.
+    /// Attribution reads require an entry for each transaction account used.
+    pub cash_fx: Option<BTreeMap<AccountId, Vec<CashFxEffect>>>,
     pub series: &'a BTreeMap<AccountId, ValuationSeries>,
     pub lots: &'a [LotRecord],
     pub disposals: &'a [LotDisposal],
+}
+
+/// Revaluation of opening cash exposure, priced before measurement. These
+/// transient inputs are independent of investment and conversion execution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CashFxEffect {
+    pub date: NaiveDate,
+    /// None means exposure or its valuation rate could not be determined.
+    pub amount: Option<Decimal>,
 }
 
 impl MeasureInputs<'_> {
@@ -51,6 +64,26 @@ impl MeasureInputs<'_> {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Use the full stored history, not the first row left by the window:
+    /// a dated read that covers inception has no earlier value to subtract.
+    /// Holdings keep their existing snapshot-based attribution rules.
+    fn attribution_baseline(
+        &self,
+        holdings: bool,
+        start: Option<NaiveDate>,
+        scope: &[AccountId],
+    ) -> Baseline {
+        let inception = scope
+            .iter()
+            .filter_map(|account| self.series.get(account)?.days.first().map(|day| day.date))
+            .min();
+        if !holdings && start.is_none_or(|start| inception.is_some_and(|date| start <= date)) {
+            Baseline::Inception
+        } else {
+            Baseline::PeriodStart
+        }
     }
 
     fn account_is_base(&self, account: &AccountId) -> bool {
@@ -198,6 +231,42 @@ fn check_not_archived(inputs: &MeasureInputs<'_>, scope: &[AccountId]) -> Result
     }
 }
 
+fn check_cash_fx_prepared(
+    inputs: &MeasureInputs<'_>,
+    scope: &[AccountId],
+    window: Window,
+    profile: MeasureProfile,
+) -> Result<(), EngineError> {
+    if profile == MeasureProfile::Dashboard {
+        return Ok(());
+    }
+    for account in scope {
+        if inputs.tracking(account) == TrackingMode::Holdings {
+            continue;
+        }
+        let points = inputs.series.get(account).map_or(0, |series| {
+            series
+                .days
+                .iter()
+                .filter(|day| window.contains(day.date))
+                .take(2)
+                .count()
+        });
+        if points == 2
+            && inputs
+                .cash_fx
+                .as_ref()
+                .and_then(|fx| fx.get(account))
+                .is_none()
+        {
+            return Err(EngineError::CashFxNotPrepared {
+                account: account.as_str().to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Performance of one account (legacy `calculate_account_performance`).
 /// `include_series` adds the daily return series (history responses only).
 pub fn measure_account(
@@ -209,6 +278,7 @@ pub fn measure_account(
 ) -> Result<PerformanceResult, EngineError> {
     check_window(window)?;
     check_not_archived(inputs, std::slice::from_ref(account))?;
+    check_cash_fx_prepared(inputs, std::slice::from_ref(account), window, profile)?;
     let history = inputs.history(account, window);
     if history.len() < 2 {
         return Ok(empty_response(
@@ -220,10 +290,13 @@ pub fn measure_account(
         ));
     }
     let holdings = inputs.tracking(account) == TrackingMode::Holdings;
+    let baseline =
+        inputs.attribution_baseline(holdings, window.start, std::slice::from_ref(account));
     let mut result = performance_core(
         &history,
         holdings,
         window.start,
+        baseline,
         include_series,
         profile,
         inputs.account_is_base(account),
@@ -234,7 +307,6 @@ pub fn measure_account(
         apply_dashboard_amount(&mut result, &history, holdings);
         return Ok(result);
     }
-    let baseline = attribution_baseline(holdings, window.start);
     finalize_attribution(
         inputs,
         &mut result,
@@ -276,6 +348,7 @@ pub fn measure_scope(
         .cloned()
         .collect();
     let scope = started.as_slice();
+    check_cash_fx_prepared(inputs, scope, window, profile)?;
     let has_holdings = scope
         .iter()
         .any(|a| inputs.tracking(a) == TrackingMode::Holdings);
@@ -317,10 +390,12 @@ pub fn measure_scope(
         ));
     }
 
+    let baseline = inputs.attribution_baseline(has_holdings, window.start, scope);
     let mut result = performance_core(
         &history,
         has_holdings,
         window.start,
+        baseline,
         include_series,
         profile,
         true,
@@ -332,13 +407,6 @@ pub fn measure_scope(
         return Ok(result);
     }
 
-    // Transaction-only all-time scopes use inception attribution; holdings
-    // scopes stay period-based (snapshots carry no cash-flow history).
-    let baseline = if has_transactions && window.start.is_none() {
-        Baseline::Inception
-    } else {
-        Baseline::PeriodStart
-    };
     let unrealized = scoped_unrealized_effects(inputs, &result, scope, baseline);
     let mut seed = Seed::default();
     if unrealized.complete {
@@ -353,10 +421,12 @@ pub fn measure_scope(
 // ------------------------------------------------------------ core math
 
 /// Legacy `compute_account_performance_with_flow_basis` (base currency).
+#[allow(clippy::too_many_arguments)]
 fn performance_core(
     history: &[DailyValuation],
     holdings: bool,
     start_opt: Option<NaiveDate>,
+    baseline: Baseline,
     include_series: bool,
     profile: MeasureProfile,
     account_is_base: bool,
@@ -367,7 +437,6 @@ fn performance_core(
     let end_point = &history[history.len() - 1];
     let actual_start = start_point.date;
     let actual_end = end_point.date;
-    let baseline = attribution_baseline(holdings, start_opt);
     let full = profile == MeasureProfile::Full;
 
     let end_value = end_point.total_value_base;
@@ -1120,14 +1189,6 @@ fn total_flows(flows: &[PeriodFlow]) -> (Decimal, Decimal) {
         })
 }
 
-fn attribution_baseline(holdings: bool, start_opt: Option<NaiveDate>) -> Baseline {
-    if !holdings && start_opt.is_none() {
-        Baseline::Inception
-    } else {
-        Baseline::PeriodStart
-    }
-}
-
 fn flows_for_attribution(
     flows: &[PeriodFlow],
     start_point: &DailyValuation,
@@ -1558,9 +1619,9 @@ fn cash_fx_attribution(
     for account in scope {
         let mut warned = false;
         for day in inputs
-            .effects
             .cash_fx
-            .get(account)
+            .as_ref()
+            .and_then(|fx| fx.get(account))
             .into_iter()
             .flatten()
             .filter(|day| day.date > start && day.date <= end)
@@ -2371,6 +2432,7 @@ fn mixed_scope_performance(
 
     let mut metrics = Vec::new();
     let mut skipped = Vec::new();
+    let mut series_unavailable = is_all_time;
     for component in &components {
         let history = &component.history;
         if history.len() < 2 {
@@ -2432,10 +2494,16 @@ fn mixed_scope_performance(
             }
             (amount, attribution, end_point.basis_status)
         } else {
+            let baseline = inputs.attribution_baseline(
+                false,
+                window.start,
+                std::slice::from_ref(&component.account),
+            );
             let mut component_result = performance_core(
                 history,
                 false,
                 window.start,
+                baseline,
                 false,
                 component_profile,
                 inputs.account_is_base(&component.account),
@@ -2445,12 +2513,15 @@ fn mixed_scope_performance(
             if component_profile == MeasureProfile::Dashboard {
                 apply_dashboard_amount(&mut component_result, history, false);
             } else {
+                // The bounded series measures changes from the opening close;
+                // it cannot represent a gain measured from inception.
+                series_unavailable |= baseline == Baseline::Inception;
                 finalize_attribution(
                     inputs,
                     &mut component_result,
                     std::slice::from_ref(&component.account),
                     history,
-                    attribution_baseline(false, window.start),
+                    baseline,
                     Seed::default(),
                 );
             }
@@ -2484,6 +2555,7 @@ fn mixed_scope_performance(
         base,
         window.start,
         include_series,
+        series_unavailable,
     )
 }
 
@@ -2494,8 +2566,8 @@ fn build_mixed_result(
     currency: &Currency,
     start_opt: Option<NaiveDate>,
     include_series: bool,
+    series_unavailable: bool,
 ) -> PerformanceResult {
-    let is_all_time = start_opt.is_none();
     let mut attribution = Attribution::default();
     let mut summary_amount = Decimal::ZERO;
     let mut denominator = Decimal::ZERO;
@@ -2580,7 +2652,7 @@ fn build_mixed_result(
 
     let mut series = Vec::new();
     if include_series && value_return.is_some() {
-        if is_all_time {
+        if series_unavailable {
             warnings.push(QualityNote::MixedSeriesUnavailable);
         } else {
             series = mixed_bounded_series(components, actual_start);
@@ -2950,6 +3022,7 @@ mod tests {
                 history,
                 false,
                 None,
+                Baseline::Inception,
                 false,
                 MeasureProfile::Full,
                 true,
@@ -3025,6 +3098,7 @@ mod tests {
             &history,
             false,
             None,
+            Baseline::Inception,
             false,
             MeasureProfile::Full,
             true,

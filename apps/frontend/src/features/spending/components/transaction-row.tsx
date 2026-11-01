@@ -1,19 +1,14 @@
+import { getCategoryLabel } from "@/lib/taxonomy-labels";
 import { memo, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { Account } from "@/lib/types";
-import { AccountType } from "@/lib/constants";
 import { TruncatedText } from "@/components/truncated-text";
 import { HOVER_SLOT, SELECTION_SLOT } from "@/lib/hover-slot";
 import { isRowBodyClick } from "@/lib/row-click";
 import { cn } from "@/lib/utils";
 import {
-  Button,
   Checkbox,
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
   Icons,
   PrivacyAmount,
   TableCell,
@@ -21,15 +16,16 @@ import {
   useDateFormatting,
 } from "@wealthfolio/ui";
 
-import { getEffectiveCashActivityType, isCreditCardAccountType } from "../lib/constants";
-import {
-  getTransactionDisplay,
-  getTransferLinkStatus,
-  isTransferCashActivity,
-  type TransactionRowVM,
-} from "../lib/transactions-helpers";
+import { getTransactionDisplay, type TransactionRowVM } from "../lib/transactions-helpers";
+import { CategoryIconTile } from "./category-chips";
 import { QuickCategorizePopover } from "./quick-categorize-popover";
 import { QuickEventPopover } from "./quick-event-popover";
+import { TransactionRowActions } from "./transaction-row-actions";
+import {
+  NEEDS_REVIEW_ROW_CLASS,
+  NeedsReviewIcon,
+  NeedsReviewStripe,
+} from "@/components/needs-review";
 
 interface TransactionRowProps {
   row: TransactionRowVM;
@@ -101,14 +97,6 @@ function TransactionRowImpl({
   const rowAriaLabel = isSelected
     ? t("spending:transactions.deselect")
     : t("spending:transactions.select");
-  const activityType = getEffectiveCashActivityType(a);
-  const isTransfer = isTransferCashActivity(a);
-  const transferLinkStatus = getTransferLinkStatus(a);
-  const canMarkReimbursement =
-    isIncome && !isCreditCardAccountType(account?.accountType) && activityType !== "CREDIT";
-  // Loans take payments only as withdrawals from a cash account.
-  const canPayLoan =
-    !!onLoanPayment && activityType === "WITHDRAWAL" && account?.accountType === AccountType.CASH;
   const time = formatTime(a.activityDate, {
     hour: "numeric",
     minute: "numeric",
@@ -120,13 +108,11 @@ function TransactionRowImpl({
       ref={ref}
       data-index={dataIndex}
       data-state={isSelected ? "selected" : undefined}
-      className={cn("group/row cursor-pointer", row.needsReview && "bg-warning/5")}
+      className={cn("group/row cursor-pointer", row.needsReview && NEEDS_REVIEW_ROW_CLASS)}
       onClick={(e) => isRowBodyClick(e) && onEdit(row)}
     >
       <TableCell className="relative w-10 px-3 py-2" data-row-click-ignore>
-        {row.needsReview && (
-          <span className="bg-warning absolute inset-y-0 start-0 w-[3px]" aria-hidden="true" />
-        )}
+        {row.needsReview && <NeedsReviewStripe />}
         <Checkbox
           checked={isSelected}
           onCheckedChange={() => onToggleSelect(a.id)}
@@ -134,7 +120,7 @@ function TransactionRowImpl({
           className={SELECTION_SLOT}
         />
       </TableCell>
-      <TableCell className="text-muted-foreground hidden w-20 whitespace-nowrap px-3 py-2 text-xs tabular-nums md:table-cell">
+      <TableCell className="text-muted-foreground hidden w-20 px-3 py-2 text-xs whitespace-nowrap tabular-nums md:table-cell">
         {time}
       </TableCell>
       {/* `max-w-0` hands this column whatever width the fixed-width columns
@@ -144,16 +130,7 @@ function TransactionRowImpl({
           plain utility and would let the note run to the viewport edge. */}
       <TableCell className="max-w-0! px-3 py-2">
         <div className="flex items-center gap-2">
-          {/* The stripe beside the checkbox carries this too, but colour alone
-              cannot be the only signal — it says nothing to a screen reader and
-              nothing to a reader who cannot separate amber from the row behind
-              it. An icon costs a line of width and says it in both registers. */}
-          {row.needsReview && (
-            <span className="text-warning shrink-0">
-              <Icons.AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
-              <span className="sr-only">{t("spending:transactions.review")}</span>
-            </span>
-          )}
+          {row.needsReview && <NeedsReviewIcon label={t("spending:transactions.review")} />}
           {a.notes != null ? (
             <TruncatedText text={a.notes} className="text-sm" />
           ) : (
@@ -201,7 +178,7 @@ function TransactionRowImpl({
         </div>
       </TableCell>
       <TableCell className="hidden w-44 px-3 py-2 sm:table-cell">
-        {isNeutral ? (
+        {isNeutral && row.splitCount === 0 ? (
           <span className="text-muted-foreground text-xs">
             {t("spending:transactions.neutral")}
           </span>
@@ -227,21 +204,35 @@ function TransactionRowImpl({
                 type="button"
                 aria-label={
                   row.category
-                    ? t("spending:transactions.changeCategory", { name: row.category.name })
+                    ? t("spending:transactions.changeCategory", {
+                        name: getCategoryLabel(
+                          t,
+                          row.category.taxonomyId,
+                          row.category.id,
+                          row.category.name,
+                        ),
+                      })
                     : t("spending:transactions.assignCategory")
                 }
                 className="hover:bg-muted/60 -mx-1 inline-flex max-w-full items-center gap-1.5 rounded-md px-1.5 py-0.5 text-start transition-colors"
               >
                 {row.category ? (
                   <>
-                    {row.category.color && (
-                      <span
-                        className="h-2.5 w-2.5 shrink-0 rounded-full"
-                        style={{ backgroundColor: row.category.color }}
-                        aria-hidden="true"
-                      />
-                    )}
-                    <span className="truncate text-sm">{row.category.name}</span>
+                    {/* h-5 matches the text-sm line height, so the row keeps its height. */}
+                    <CategoryIconTile
+                      icon={row.category.icon}
+                      color={row.category.color}
+                      className="h-5 w-5"
+                      iconClassName="h-3 w-3"
+                    />
+                    <span className="truncate text-sm">
+                      {getCategoryLabel(
+                        t,
+                        row.category.taxonomyId,
+                        row.category.id,
+                        row.category.name,
+                      )}
+                    </span>
                   </>
                 ) : (
                   <span className="text-muted-foreground inline-flex items-center gap-1 text-xs italic">
@@ -270,74 +261,25 @@ function TransactionRowImpl({
         <PrivacyAmount value={Math.abs(safeAmount)} currency={a.currency} />
       </TableCell>
       {showBalance && (
-        <TableCell className="text-muted-foreground hidden w-28 whitespace-nowrap px-3 py-2 text-end text-sm tabular-nums sm:table-cell">
+        <TableCell className="text-muted-foreground hidden w-28 px-3 py-2 text-end text-sm whitespace-nowrap tabular-nums sm:table-cell">
           {a.cashBalance != null && a.cashBalanceCurrency && (
             <PrivacyAmount value={Number(a.cashBalance)} currency={a.cashBalanceCurrency} />
           )}
         </TableCell>
       )}
       <TableCell className="w-10 px-3 py-2" data-row-click-ignore>
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <Button
-                variant="ghost"
-                size="icon"
-                className={cn("data-popup-open:opacity-100 h-7 w-7", HOVER_SLOT)}
-                aria-label={t("spending:transactions.rowActions")}
-              />
-            }
-          >
-            <Icons.MoreVertical className="h-4 w-4" aria-hidden="true" />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={() => onEdit(row)}>
-              <Icons.Pencil className="me-2 h-4 w-4" aria-hidden="true" />
-              {t("common:edit")}
-            </DropdownMenuItem>
-            {canMarkReimbursement && (
-              <DropdownMenuItem onClick={() => onMarkReimbursement(row)}>
-                <Icons.RefreshCw className="me-2 h-4 w-4" aria-hidden="true" />
-                {t("spending:transactions.markReimbursement")}
-              </DropdownMenuItem>
-            )}
-            {!isNeutral && (
-              <DropdownMenuItem onClick={() => onEditSplits(row)}>
-                <Icons.SplitHorizontal className="me-2 h-4 w-4" aria-hidden="true" />
-                {t("spending:transactions.splitTransaction")}
-              </DropdownMenuItem>
-            )}
-            <DropdownMenuItem onClick={() => onDuplicate(row)}>
-              <Icons.Copy className="me-2 h-4 w-4" aria-hidden="true" />
-              {t("spending:transactions.duplicate")}
-            </DropdownMenuItem>
-            {isTransfer && (onLinkTransfer || onUnlinkTransfer) ? (
-              transferLinkStatus === "linked" ? (
-                onUnlinkTransfer ? (
-                  <DropdownMenuItem onClick={() => onUnlinkTransfer(row)}>
-                    <Icons.Unlink className="me-2 h-4 w-4" aria-hidden="true" />
-                    {t("spending:transactions.unlinkTransfer")}
-                  </DropdownMenuItem>
-                ) : null
-              ) : onLinkTransfer ? (
-                <DropdownMenuItem onClick={() => onLinkTransfer(row)}>
-                  <Icons.Link className="me-2 h-4 w-4" aria-hidden="true" />
-                  {t("spending:transactions.linkTransfer")}
-                </DropdownMenuItem>
-              ) : null
-            ) : null}
-            {canPayLoan && (
-              <DropdownMenuItem onClick={() => onLoanPayment(row)}>
-                <Icons.Link className="me-2 h-4 w-4" aria-hidden="true" />
-                {t("asset:loanPayments.menu")}
-              </DropdownMenuItem>
-            )}
-            <DropdownMenuItem className="text-destructive" onClick={() => onDelete(row)}>
-              <Icons.Trash className="me-2 h-4 w-4" aria-hidden="true" />
-              {t("common:delete")}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <TransactionRowActions
+          row={row}
+          account={account}
+          onMarkReimbursement={onMarkReimbursement}
+          onEditSplits={onEditSplits}
+          onEdit={onEdit}
+          onDuplicate={onDuplicate}
+          onDelete={onDelete}
+          onLinkTransfer={onLinkTransfer}
+          onUnlinkTransfer={onUnlinkTransfer}
+          onLoanPayment={onLoanPayment}
+        />
       </TableCell>
     </TableRow>
   );

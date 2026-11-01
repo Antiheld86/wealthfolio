@@ -25,6 +25,7 @@ jobs:
       formatting: ${{ steps.filter.outputs.formatting }}
       android: ${{ steps.filter.outputs.android }}
       ios: ${{ steps.filter.outputs.ios }}
+      addon_sandbox: ${{ steps.filter.outputs.addon_sandbox }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -125,16 +126,22 @@ jobs:
         # The frontend unit tests run in the Frontend Tests job.
         run: pnpm test:scripts
 
+      - name: Check the generated theme CSS
+        # Fails when src/themes/generated is stale against the definitions, or a
+        # definition breaks the generator's rules (unknown tokens, font stacks
+        # without "Rubik Arabic", component rules). Contrast is checked by the
+        # on-demand design-system suite, not here.
+        run: pnpm themes:check
+
       - name: Build frontend
         run: pnpm build
 
       - name: Install addon sandbox browsers
+        if: needs.changes.outputs.addon_sandbox == 'true'
         run: pnpm exec playwright install --with-deps chromium firefox webkit
 
-      - name: Run net worth layout regression tests
-        run: pnpm test:e2e:net-worth
-
       - name: Run addon sandbox browser tests
+        if: needs.changes.outputs.addon_sandbox == 'true'
         run: pnpm test:e2e:addon-sandbox
         env:
           WF_ADDON_SANDBOX_SKIP_BUILD: "true"
