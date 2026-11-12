@@ -331,12 +331,39 @@ type PreparedDateFormatters = Pick<
   "date" | "calendarDate" | "calendarDateTime" | "timeOfDay" | "time" | "dateTime"
 >;
 
-function separators(locale: string) {
+interface LocaleNumberSymbols {
+  decimal?: string;
+  group?: string;
+  currencyGroup?: string;
+  integerFormatter: Intl.NumberFormat;
+}
+
+const localeNumberSymbols = new Map<string, LocaleNumberSymbols>();
+
+// Parsing runs on every keystroke; building these formatters dominated its cost.
+function getLocaleNumberSymbols(locale: string): LocaleNumberSymbols {
+  const cached = localeNumberSymbols.get(locale);
+  if (cached) return cached;
+
   const parts = new Intl.NumberFormat(locale).formatToParts(12345.6);
-  return {
-    decimal: parts.find((part) => part.type === "decimal")?.value ?? ".",
-    group: parts.find((part) => part.type === "group")?.value ?? ",",
+  const symbols = {
+    decimal: parts.find((part) => part.type === "decimal")?.value,
+    group: parts.find((part) => part.type === "group")?.value,
+    currencyGroup: new Intl.NumberFormat(locale, { style: "currency", currency: "EUR" })
+      .formatToParts(12345.6)
+      .find((part) => part.type === "group")?.value,
+    integerFormatter: new Intl.NumberFormat(locale, {
+      useGrouping: true,
+      maximumFractionDigits: 0,
+    }),
   };
+  localeNumberSymbols.set(locale, symbols);
+  return symbols;
+}
+
+function separators(locale: string) {
+  const { decimal, group } = getLocaleNumberSymbols(locale);
+  return { decimal: decimal ?? ".", group: group ?? "," };
 }
 
 const currencyAffixMatchers = new Map<string, { prefix: RegExp; suffix: RegExp }>();
@@ -402,10 +429,7 @@ function stripFinancialAffixes(value: string, locale: string): FinancialNumberIn
 }
 
 function hasValidGrouping(value: string, locale: string, parsed: number): boolean {
-  const formatter = new Intl.NumberFormat(locale);
-  const parts = formatter.formatToParts(12345.6);
-  const decimal = parts.find((part) => part.type === "decimal")?.value;
-  const group = parts.find((part) => part.type === "group")?.value;
+  const { decimal, group, integerFormatter } = getLocaleNumberSymbols(locale);
   if (!group) return true;
 
   const normalized = /\s/u.test(group) ? value.replace(/[\s\u00a0\u202f]/gu, group) : value;
@@ -415,10 +439,7 @@ function hasValidGrouping(value: string, locale: string, parsed: number): boolea
 
   const actualGroups = integer.replace(/^[+-]/, "").split(group);
   if (actualGroups.some((part) => part.length === 0)) return false;
-  const expectedGroups = new Intl.NumberFormat(locale, {
-    useGrouping: true,
-    maximumFractionDigits: 0,
-  })
+  const expectedGroups = integerFormatter
     .formatToParts(Math.trunc(Math.abs(parsed)))
     .filter((part) => part.type === "integer")
     .map((part) => Array.from(part.value).length);
@@ -432,17 +453,14 @@ const INVARIANT_NUMBER_PATTERN =
   /^[+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 
 function normalizeCurrencyGrouping(input: FinancialNumberInput, locale: string): string {
-  const { value, hasCurrencyAffix } = input;
+  const { hasCurrencyAffix } = input;
   const { decimal, group } = separators(locale);
+  // Apostrophe grouping (de-CH, de-LI…) is ' or ’ depending on the engine's locale data.
+  const value = group === "'" || group === "’" ? input.value.replace(/['’]/g, group) : input.value;
   // A currency affix or localized decimal mark disambiguates the input.
   // In de-AT, currency amounts group with dots while decimals group with spaces.
   if (!hasCurrencyAffix && !value.includes(decimal)) return value;
-  const currencyGroup = new Intl.NumberFormat(locale, {
-    style: "currency",
-    currency: "EUR",
-  })
-    .formatToParts(12345.6)
-    .find((part) => part.type === "group")?.value;
+  const { currencyGroup } = getLocaleNumberSymbols(locale);
   return currencyGroup && currencyGroup !== group ? value.replaceAll(currencyGroup, group) : value;
 }
 
@@ -740,14 +758,17 @@ function createLocaleAmountFormatting(
   prepared?: PreparedAmountFormatters,
 ): AmountFormatting {
   const resolvedLocale = resolveFormattingLocale(locale);
-  const decimalFormatter = prepared?.decimal ?? new Intl.NumberFormat(resolvedLocale);
+  const decimalFormatter =
+    prepared?.decimal ?? new Intl.NumberFormat(resolvedLocale, { useGrouping: true });
   const amountFormatter =
     prepared?.amount ??
     new Intl.NumberFormat(resolvedLocale, {
+      useGrouping: true,
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     });
   const roundedDecimalFormatter = new Intl.NumberFormat(resolvedLocale, {
+    useGrouping: true,
     maximumFractionDigits: 0,
   });
   const currencyFormatters = new Map<string, Intl.NumberFormat>();
@@ -785,7 +806,7 @@ function createLocaleAmountFormatting(
     const key = `${minimumFractionDigits ?? ""}:${maximumFractionDigits ?? ""}`;
     let formatter = amountDecimalFormatters.get(key);
     if (!formatter) {
-      formatter = new Intl.NumberFormat(resolvedLocale, options);
+      formatter = new Intl.NumberFormat(resolvedLocale, { ...options, useGrouping: true });
       amountDecimalFormatters.set(key, formatter);
     }
     return formatter;
@@ -794,6 +815,7 @@ function createLocaleAmountFormatting(
     let formatter = priceDecimalFormatters.get(maximumFractionDigits);
     if (!formatter) {
       formatter = new Intl.NumberFormat(resolvedLocale, {
+        useGrouping: true,
         minimumFractionDigits: DISPLAY_DECIMAL_PRECISION,
         maximumFractionDigits,
       });
@@ -841,6 +863,7 @@ function createLocaleAmountFormatting(
       let formatter = currencyFormatters.get(normalizedCurrency);
       if (!formatter) {
         formatter = new Intl.NumberFormat(resolvedLocale, {
+          useGrouping: true,
           style: "currency",
           currency: normalizedCurrency,
           minimumFractionDigits: fractionDigits,
@@ -870,6 +893,7 @@ function createLocaleAmountFormatting(
         let formatter = roundedCurrencyFormatters.get(normalizedCurrency);
         if (!formatter) {
           formatter = new Intl.NumberFormat(resolvedLocale, {
+            useGrouping: true,
             style: "currency",
             currency: normalizedCurrency,
             maximumFractionDigits: 0,
@@ -960,6 +984,7 @@ function createLocaleAmountFormatting(
         let formatter = priceCurrencyFormatters.get(key);
         if (!formatter) {
           formatter = new Intl.NumberFormat(resolvedLocale, {
+            useGrouping: true,
             style: "currency",
             currency: normalizedCurrency,
             minimumFractionDigits: DISPLAY_DECIMAL_PRECISION,
@@ -1053,7 +1078,8 @@ export function createNumberFormatting(
 ): NumberFormatting {
   const resolvedLocale = resolveFormattingLocale(locale);
   const { decimal, group } = separators(resolvedLocale);
-  const decimalFormatter = prepared?.decimal ?? new Intl.NumberFormat(resolvedLocale);
+  const decimalFormatter =
+    prepared?.decimal ?? new Intl.NumberFormat(resolvedLocale, { useGrouping: true });
   const quantityFormatter =
     prepared?.quantity ??
     new Intl.NumberFormat(resolvedLocale, {
@@ -1078,7 +1104,10 @@ export function createNumberFormatting(
     ].join(":");
     let formatter = decimalFormatters.get(key);
     if (!formatter) {
-      formatter = new Intl.NumberFormat(resolvedLocale, options);
+      formatter = new Intl.NumberFormat(resolvedLocale, {
+        ...options,
+        useGrouping: options.useGrouping ?? (options.notation === "compact" ? undefined : true),
+      });
       decimalFormatters.set(key, formatter);
     }
     return formatter;
@@ -1096,6 +1125,7 @@ export function createNumberFormatting(
       if (!formatter) {
         formatter = new Intl.NumberFormat(resolvedLocale, {
           style: "percent",
+          useGrouping: true,
           minimumFractionDigits: digits,
           maximumFractionDigits: digits,
           signDisplay,
